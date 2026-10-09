@@ -13,7 +13,9 @@ dnf5 install -y --setopt=install_weak_deps=False \
     vdpauinfo \
     xorg-x11-drv-nvidia-libs.i686 \
     xorg-x11-drv-nvidia-cuda-libs.i686 \
+    "kernel-core-${kernel_version}" \
     "kernel-devel-${kernel_version}" \
+    "kernel-devel-matched-${kernel_version}" \
     gcc \
     make \
     elfutils-libelf-devel \

@@ -1,0 +1,16 @@
+.git
+**/.git
+.agents
+.codex
+.aws
+cosign.key
+output
+_build*
+*_chunkah_*
+*_rpm-ostree_*
+**/__pycache__
+**/*.pyc
+**/*.pyo
+quickshell/.vscode
+quickshell/tests
+quickshell/native/qt-theme/build-qt*

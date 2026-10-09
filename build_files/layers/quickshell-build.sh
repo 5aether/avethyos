@@ -12,6 +12,8 @@ for major in 5 6; do
     cp -R "/tmp/qt${major}/plugins" "/out/qt-theme/qt${major}/"
 done
 
+find /out/qt-theme -type f -name '*.so' -exec strip --strip-unneeded {} +
+
 rpm -q --qf '%{NAME}-%{EVR}.%{ARCH}\n' \
     qt5-qtbase qt5-qtbase-common qt5-qtbase-gui \
     qt6-qtbase qt6-qtbase-common qt6-qtbase-gui > /out/qt-packages

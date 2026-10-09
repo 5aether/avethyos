@@ -12,8 +12,8 @@ curl --fail --location --retry 3 \
 sed -i '/^CollectionID=/d; /^\[Flatpak Repo\]$/a CollectionID=org.flathub.Stable' \
     /usr/share/flatpak/remotes.d/flathub.flatpakrepo
 
-flatpak remote-add --installation=avethyos-build --if-not-exists \
-    --collection-id=org.flathub.Stable flathub \
+flatpak remote-add --installation=avethyos-build --if-not-exists --from \
+    flathub \
     /usr/share/flatpak/remotes.d/flathub.flatpakrepo
 flatpak config --installation=avethyos-build --set languages '*'
 flatpak install --installation=avethyos-build -y --noninteractive flathub \

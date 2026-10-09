@@ -10,8 +10,6 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - '**/README.md'
   workflow_dispatch:
 
 env:
@@ -126,14 +124,24 @@ jobs:
         env:
           ALIAS_TAGS: ${{ steps.gen-build-tags.outputs.alias_tags }}
         run: |
-          set -euox pipefail
+          set -euo pipefail
+          image_ref="${IMAGE_REGISTRY}/${IMAGE_NAME}"
+          podman push --format=oci --compression-format=zstd --compression-level=19 \
+            --force-compression --digestfile=/tmp/digestfile \
+            "${IMAGE_NAME}:${DEFAULT_TAG}" "${image_ref}:${DEFAULT_TAG}"
           for tag in ${ALIAS_TAGS}; do
-            podman push --digestfile=/tmp/digestfile ${IMAGE_NAME}:${tag} ${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}
+            if [[ "$tag" != "$DEFAULT_TAG" ]]; then
+              skopeo copy --preserve-digests --retry-times=3 \
+                "docker://${image_ref}:${DEFAULT_TAG}" "docker://${image_ref}:${tag}"
+            fi
           done
 
           digest=$(< /tmp/digestfile)
-
           echo "digest=${digest}" >> $GITHUB_OUTPUT
+          download_bytes=$(skopeo inspect --raw "docker://${image_ref}:${DEFAULT_TAG}" | \
+            jq '[.layers[].size] | add')
+          download_size=$(numfmt --to=iec-i --suffix=B "$download_bytes")
+          echo "${IMAGE_VARIANT}: ${download_size} of compressed image layers" >> "$GITHUB_STEP_SUMMARY"
 
       # This section is optional and only needs to be enabled if you plan on distributing
       # your project for others to consume. You will need to create a public and private key

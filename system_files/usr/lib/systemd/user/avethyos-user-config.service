@@ -1,0 +1,13 @@
+[Unit]
+Description=Install default desktop configuration
+Before=default.target graphical-session-pre.target
+ConditionPathIsDirectory=%h
+ConditionUser=!sddm
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /usr/libexec/avethyos-user-config
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

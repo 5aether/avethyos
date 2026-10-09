@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+
+config_dir="${HOME}/.config"
+mkdir -p "$config_dir"
+xdg-user-dirs-update
+
+cp -R --update=none /etc/skel/.config/hypr /etc/skel/.config/quickshell "$config_dir/"

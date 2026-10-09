@@ -1,0 +1,26 @@
+# Singletons and shared services. Every window imports this module by relative
+# path, so the service layer stays in one place and cannot be duplicated.
+#
+# A singleton must be the only instance of its type in the shell: each extra
+# instance would register a second notification server or polkit agent.
+
+singleton Theme 1.0 Theme.qml
+singleton Config 1.0 Config.qml
+singleton WallpaperManager 1.0 WallpaperManager.qml
+singleton WallpaperLibrary 1.0 WallpaperLibrary.qml
+singleton NotificationManager 1.0 NotificationManager.qml
+singleton NotificationStore 1.0 NotificationStore.qml
+singleton PolkitManager 1.0 PolkitManager.qml
+singleton AudioService 1.0 AudioService.qml
+singleton MediaService 1.0 MediaService.qml
+singleton SystemService 1.0 SystemService.qml
+singleton BluetoothService 1.0 BluetoothService.qml
+singleton NetworkService 1.0 NetworkService.qml
+singleton NightLightService 1.0 NightLightService.qml
+singleton IconThemeService 1.0 IconThemeService.qml
+singleton NowPlayingService 1.0 NowPlayingService.qml
+singleton ClipboardService 1.0 ClipboardService.qml
+singleton AppUsage 1.0 AppUsage.qml
+singleton AppSearchIndex 1.0 AppSearchIndex.qml
+singleton OsdService 1.0 OsdService.qml
+singleton OverlayService 1.0 OverlayService.qml

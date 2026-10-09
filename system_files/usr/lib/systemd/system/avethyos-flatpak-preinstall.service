@@ -1,0 +1,14 @@
+[Unit]
+Description=Install default Flatpak applications
+Wants=network-online.target
+After=network-online.target
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flatpak preinstall --system -y --noninteractive --sideload-repo=/usr/share/avethyos/flatpak-seed
+TimeoutStartSec=10min
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

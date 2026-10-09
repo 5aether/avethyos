@@ -1,0 +1,22 @@
+module Avethy
+singleton Theme 1.0 Theme.qml
+ApplicationWindow 2.15 ApplicationWindow.qml
+Button 2.15 Button.qml
+ToolButton 2.15 ToolButton.qml
+TextField 2.15 TextField.qml
+CheckBox 2.15 CheckBox.qml
+RadioButton 2.15 RadioButton.qml
+Switch 2.15 Switch.qml
+Slider 2.15 Slider.qml
+ProgressBar 2.15 ProgressBar.qml
+ItemDelegate 2.15 ItemDelegate.qml
+Pane 2.15 Pane.qml
+Frame 2.15 Frame.qml
+Popup 2.15 Popup.qml
+ComboBox 2.15 ComboBox.qml
+Menu 2.15 Menu.qml
+MenuItem 2.15 MenuItem.qml
+MenuSeparator 2.15 MenuSeparator.qml
+ToolTip 2.15 ToolTip.qml
+TabButton 2.15 TabButton.qml
+ScrollBar 2.15 ScrollBar.qml

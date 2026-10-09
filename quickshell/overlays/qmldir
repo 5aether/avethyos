@@ -1,0 +1,7 @@
+# Transient panels drawn above the bar. Each is created once by shell.qml.
+
+PolkitDialog 1.0 PolkitDialog.qml
+NotificationToast 1.0 NotificationToast.qml
+NowPlayingToast 1.0 NowPlayingToast.qml
+MediaTransfer 1.0 MediaTransfer.qml
+Osd 1.0 Osd.qml

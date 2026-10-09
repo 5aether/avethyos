@@ -1,0 +1,12 @@
+[Unit]
+Description=Initialize Homebrew
+After=local-fs.target systemd-sysusers.service
+Before=systemd-user-sessions.service sddm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/avethyos-homebrew-bootstrap
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

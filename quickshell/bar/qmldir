@@ -1,0 +1,18 @@
+# Top bar and everything drawn inside it. shell.qml imports this module; Bar.qml
+# uses the other types from it.
+
+Bar 1.0 Bar.qml
+AppMenu 1.0 AppMenu.qml
+AppActionMenu 1.0 AppActionMenu.qml
+Workspaces 1.0 Workspaces.qml
+Clock 1.0 Clock.qml
+MediaPlayer 1.0 MediaPlayer.qml
+Tray 1.0 Tray.qml
+ControlCenter 1.0 ControlCenter.qml
+NetworkMenu 1.0 NetworkMenu.qml
+BluetoothMenu 1.0 BluetoothMenu.qml
+WallpaperMenu 1.0 WallpaperMenu.qml
+NightLightMenu 1.0 NightLightMenu.qml
+PopupFocus 1.0 PopupFocus.qml
+Clipboard 1.0 Clipboard.qml
+BluetoothAudio 1.0 BluetoothAudio.qml

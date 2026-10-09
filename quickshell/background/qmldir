@@ -1,0 +1,3 @@
+# Wallpaper surface. A Variants over the outputs, so it renders once per screen.
+
+WallpaperSurface 1.0 WallpaperSurface.qml

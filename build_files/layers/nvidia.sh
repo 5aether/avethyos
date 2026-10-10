@@ -37,5 +37,7 @@ add_drivers+=" nvidia nvidia_modeset nvidia_uvm nvidia_drm "
 omit_drivers+=" nouveau "
 EOF
 
+install -d -m 0700 /var/roothome
+
 DRACUT_NO_XATTR=1 dracut --force --no-hostonly \
     "/usr/lib/modules/${kernel_version}/initramfs.img" "$kernel_version"

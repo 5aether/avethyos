@@ -1,0 +1,3 @@
+# Select SDDM before Fedora's default display-manager presets.
+disable gdm.service
+enable sddm.service

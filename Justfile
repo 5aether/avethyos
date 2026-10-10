@@ -10,9 +10,9 @@ export default_tag := env_var("DEFAULT_TAG")
 export nvidia_tag := if default_tag == "latest" { "nvidia" } else { default_tag + "-nvidia" }
 export bib_image := env_var("BIB_IMAGE")
 
-alias build-vm := build-qcow2
-alias rebuild-vm := rebuild-qcow2
-alias run-vm := run-vm-qcow2
+alias build-vm := build-iso
+alias rebuild-vm := rebuild-iso
+alias run-vm := run-vm-iso
 
 [private]
 default:
@@ -313,98 +313,78 @@ _rootful_load_image $target_image=image_name $tag=default_tag:
         just sudoif podman pull "${target_image}:${tag}"
     fi
 
-# Build a bootc bootable image using Bootc Image Builder (BIB)
-# Converts a container image to a bootable image
+# Build an installer ISO using Bootc Image Builder (BIB)
 # Parameters:
 #   target_image: The name of the image to build (ex. localhost/fedora)
 #   tag: The tag of the image to build (ex. latest)
-#   type: The type of image to build (ex. qcow2, raw, iso)
-#   config: The configuration file to use for the build (default: disk_config/disk.toml)
+#   output_dir: The directory for the ISO and build artifacts (default: output)
 
-# Example: just _rebuild-bib localhost/fedora latest qcow2 disk_config/disk.toml
-_build-bib $target_image $tag $type $config $output_dir="output": (_rootful_load_image target_image tag)
+# Example: just build-iso localhost/fedora latest
+_build-bib $target_image $tag $output_dir="output": (_rootful_load_image target_image tag)
     #!/usr/bin/env bash
     set -euo pipefail
-
-    args="--type ${type} "
-    args+="--use-librepo=True "
-    args+="--rootfs=btrfs"
 
     BUILDTMP=$(mktemp -p "${PWD}" -d -t _build-bib.XXXXXXXXXX)
 
     sudo podman run \
       --rm \
-      -it \
       --privileged \
       --pull=newer \
       --net=host \
       --security-opt label=type:unconfined_t \
-      -v $(pwd)/${config}:/config.toml:ro \
-      -v $BUILDTMP:/output \
-      -v /var/lib/containers/storage:/var/lib/containers/storage \
+      -v "${PWD}/disk_config/iso.toml:/config.toml:ro" \
+      -v "${BUILDTMP}:/output" \
+      -v "/var/lib/containers/storage:/var/lib/containers/storage" \
       "${bib_image}" \
-      ${args} \
+      build \
+      --type anaconda-iso \
+      --output /output \
+      --use-librepo=True \
+      --rootfs=btrfs \
       "${target_image}:${tag}"
 
-    mkdir -p "${output_dir}"
+    # Replace the ISO file directly so rebuilding can reuse an existing bootiso directory.
+    mkdir -p "${output_dir}/bootiso"
+    sudo mv -f "${BUILDTMP}/bootiso/install.iso" "${output_dir}/bootiso/install.iso"
+    sudo rmdir "${BUILDTMP}/bootiso"
     sudo mv -f "${BUILDTMP}"/* "${output_dir}/"
     sudo rmdir "${BUILDTMP}"
     sudo chown -R "$USER:$USER" "${output_dir}/"
 
-# Podman builds the image from the Containerfile and creates a bootable image
+# Podman builds the image from the Containerfile and creates an installer ISO
 # Parameters:
 #   target_image: The name of the image to build (ex. localhost/fedora)
 #   tag: The tag of the image to build (ex. latest)
-#   type: The type of image to build (ex. qcow2, raw, iso)
-#   config: The configuration file to use for the build (deafult: disk_config/disk.toml)
+#   variant: The container variant to build (default: standard)
+#   output_dir: The directory for the ISO and build artifacts (default: output)
 
-# Example: just _rebuild-bib localhost/fedora latest qcow2 disk_config/disk.toml
-_rebuild-bib $target_image $tag $type $config $variant="standard" $output_dir="output": (build target_image tag variant) && (_build-bib target_image tag type config output_dir)
-
-# Build a QCOW2 virtual machine image
-[group('Build Virtal Machine Image')]
-build-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "qcow2" "disk_config/disk.toml")
-
-# Build a RAW virtual machine image
-[group('Build Virtal Machine Image')]
-build-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "raw" "disk_config/disk.toml")
+# Example: just rebuild-iso localhost/fedora latest
+_rebuild-bib $target_image $tag $variant="standard" $output_dir="output": (build target_image tag variant) && (_build-bib target_image tag output_dir)
 
 # Build an ISO virtual machine image
 [group('Build Virtal Machine Image')]
-build-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "anaconda-iso" "disk_config/iso.toml")
+build-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag)
 
 [group('Build Virtal Machine Image')]
-build-iso-nvidia $target_image=("localhost/" + image_name) $tag=nvidia_tag: && (_build-bib target_image tag "anaconda-iso" "disk_config/iso.toml" "output/nvidia")
-
-# Rebuild a QCOW2 virtual machine image
-[group('Build Virtal Machine Image')]
-rebuild-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "qcow2" "disk_config/disk.toml")
-
-# Rebuild a RAW virtual machine image
-[group('Build Virtal Machine Image')]
-rebuild-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "raw" "disk_config/disk.toml")
+build-iso-nvidia $target_image=("localhost/" + image_name) $tag=nvidia_tag: && (_build-bib target_image tag "output/nvidia")
 
 # Rebuild an ISO virtual machine image
 [group('Build Virtal Machine Image')]
-rebuild-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "anaconda-iso" "disk_config/iso.toml")
+rebuild-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag)
 
 [group('Build Virtal Machine Image')]
-rebuild-iso-nvidia $target_image=("localhost/" + image_name) $tag=nvidia_tag: && (_rebuild-bib target_image tag "anaconda-iso" "disk_config/iso.toml" "nvidia" "output/nvidia")
+rebuild-iso-nvidia $target_image=("localhost/" + image_name) $tag=nvidia_tag: && (_rebuild-bib target_image tag "nvidia" "output/nvidia")
 
-# Run a virtual machine with the specified image type and configuration
-_run-vm $target_image $tag $type $config:
+# Run a virtual machine from an installer ISO
+_run-vm $target_image $tag:
     #!/usr/bin/env bash
     set -eoux pipefail
 
-    # Determine the image file based on the type
-    image_file="output/${type}/disk.${type}"
-    if [[ $type == iso ]]; then
-        image_file="output/bootiso/install.iso"
-    fi
+    image_file="output/bootiso/install.iso"
 
     # Build the image if it does not exist
     if [[ ! -f "${image_file}" ]]; then
-        just "build-${type}" "$target_image" "$tag"
+        just build-iso "$target_image" "$tag"
     fi
 
     # Determine an available port to use
@@ -426,42 +406,16 @@ _run-vm $target_image $tag $type $config:
     run_args+=(--env "TPM=Y")
     run_args+=(--env "GPU=Y")
     run_args+=(--device=/dev/kvm)
-    run_args+=(--volume "${PWD}/${image_file}":"/boot.${type}")
+    run_args+=(--volume "${PWD}/${image_file}:/boot.iso")
     run_args+=(docker.io/qemux/qemu)
 
     # Run the VM and open the browser to connect
     (sleep 30 && xdg-open http://localhost:"$port") &
     podman run "${run_args[@]}"
 
-# Run a virtual machine from a QCOW2 image
-[group('Run Virtal Machine')]
-run-vm-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "qcow2" "disk_config/disk.toml")
-
-# Run a virtual machine from a RAW image
-[group('Run Virtal Machine')]
-run-vm-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "raw" "disk_config/disk.toml")
-
 # Run a virtual machine from an ISO
 [group('Run Virtal Machine')]
-run-vm-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "iso" "disk_config/iso.toml")
-
-# Run a virtual machine using systemd-vmspawn
-[group('Run Virtal Machine')]
-spawn-vm rebuild="0" type="qcow2" ram="6G":
-    #!/usr/bin/env bash
-
-    set -euo pipefail
-
-    [ "{{ rebuild }}" -eq 1 ] && echo "Rebuilding the ISO" && just build-vm {{ rebuild }} {{ type }}
-
-    systemd-vmspawn \
-      -M "bootc-image" \
-      --console=gui \
-      --cpus=2 \
-      --ram=$(echo {{ ram }}| numfmt --from=iec) \
-      --network-user-mode \
-      --vsock=false --pass-ssh-key=false \
-      -i ./output/**/*.{{ type }}
+run-vm-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag)
 
 # Runs shell check on all Bash scripts
 lint:

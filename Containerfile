@@ -6,6 +6,15 @@ FROM scratch AS desktop
 COPY hypr /hypr
 COPY quickshell /quickshell
 
+FROM quay.io/fedora/fedora-bootc:44 AS ogc-kernel
+ARG OGC_KERNEL_REF=ghcr.io/opengamingcollective/kernel-packages-fedora:latest-fc44
+
+RUN --mount=type=cache,dst=/var/cache \
+    --mount=type=cache,dst=/var/log \
+    --mount=type=tmpfs,dst=/tmp \
+    dnf5 install -y --setopt=install_weak_deps=False golang-oras && \
+    oras pull --output /kernel-rpms "${OGC_KERNEL_REF}"
+
 FROM quay.io/fedora/fedora-bootc:44 AS base
 
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
@@ -19,6 +28,13 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
     --mount=type=cache,dst=/var/log \
     --mount=type=tmpfs,dst=/tmp \
     bash /ctx/layers/repo-tools.sh
+
+RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
+    --mount=type=bind,from=ogc-kernel,source=/kernel-rpms,target=/kernel-rpms \
+    --mount=type=cache,dst=/var/cache \
+    --mount=type=cache,dst=/var/log \
+    --mount=type=tmpfs,dst=/tmp \
+    bash /ctx/layers/kernel.sh
 
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
     --mount=type=cache,dst=/var/cache \
@@ -115,6 +131,7 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
 FROM common AS nvidia
 
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
+    --mount=type=bind,from=ogc-kernel,source=/kernel-rpms,target=/kernel-rpms \
     --mount=type=cache,dst=/var/cache \
     --mount=type=cache,dst=/var/log \
     --mount=type=tmpfs,dst=/tmp \

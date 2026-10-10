@@ -5,7 +5,11 @@ dnf5 install -y --setopt=install_weak_deps=False \
     flatpak flatpak-session-helper accountsservice /usr/bin/curl
 
 mkdir -p /tmp/avethyos-flatpak-cache /tmp/avethyos-flatpak-triggers
+# dconf uses XDG_RUNTIME_DIR for shared memory, independently of the cache.
+# Keep it on the build's tmpfs instead of falling back to the absent root home.
+install -d -m 0700 /tmp/avethyos-flatpak-runtime
 export XDG_CACHE_HOME=/tmp/avethyos-flatpak-cache
+export XDG_RUNTIME_DIR=/tmp/avethyos-flatpak-runtime
 export FLATPAK_TRIGGERSDIR=/tmp/avethyos-flatpak-triggers
 
 mkdir -p /etc/flatpak/installations.d /usr/share/flatpak/remotes.d

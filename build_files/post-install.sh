@@ -12,3 +12,18 @@ for repo_dir in /etc/yum.repos.d /etc/distro.repos.d /usr/share/dnf5/repos.d; do
 done
 
 dnf5 clean all
+
+kernel_version=$(rpm -q kernel-core --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}\n')
+if [[ $kernel_version == *$'\n'* || $kernel_version != *-ogc* ]]; then
+    printf 'Expected one installed OGC kernel-core package, got: %s\n' "$kernel_version" >&2
+    exit 1
+fi
+
+# Generate one generic bootc initramfs after all layers, including NVIDIA.
+install -d -m 0700 /var/roothome
+depmod -a "$kernel_version"
+DRACUT_NO_XATTR=1 dracut --force --no-hostonly \
+    --add-confdir /ctx/kernel/dracut.conf.d \
+    "/usr/lib/modules/${kernel_version}/initramfs.img" "$kernel_version"
+test -s "/usr/lib/modules/${kernel_version}/vmlinuz"
+test -s "/usr/lib/modules/${kernel_version}/initramfs.img"

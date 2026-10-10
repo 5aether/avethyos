@@ -2,7 +2,7 @@
 set -euo pipefail
 
 dnf5 install -y --setopt=install_weak_deps=False \
-    'hyprland >= 0.55' hyprshot hyprpicker \
+    'hyprland >= 0.55' hyprshot hyprpicker hyprland-guiutils \
     kitty nautilus grim slurp wl-clipboard jq \
     xorg-x11-server-Xwayland xdg-utils xdg-user-dirs \
     xdg-desktop-portal-hyprland xdg-desktop-portal-gtk \

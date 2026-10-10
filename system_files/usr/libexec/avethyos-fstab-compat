@@ -1,0 +1,59 @@
+#!/bin/bash
+set -euo pipefail
+
+# Anaconda can leave the physical root's entry pointing at the composefs overlay.
+# https://bootc.dev/bootc/bootc-installation.7.html#finding-and-configuring-the-physical-root-filesystem
+fstab=${1:-/etc/fstab}
+[[ -f "$fstab" ]] || exit 0
+
+read -r root_type root_source <<< "$(findmnt --noheadings --raw --mountpoint / --output FSTYPE,SOURCE)"
+[[ "$root_type" == overlay && "$root_source" == composefs* ]] || exit 0
+
+physical_type=$(findmnt --noheadings --raw --mountpoint /sysroot --output FSTYPE)
+case "$physical_type" in
+    btrfs|ext4|xfs) ;;
+    *) echo "Unsupported physical root filesystem: $physical_type" >&2; exit 1 ;;
+esac
+
+read -r root_entries sysroot_entries <<< "$(awk '
+    /^[[:space:]]*#/ { next }
+    $2 == "/" { roots++ }
+    $2 == "/sysroot" { sysroots++ }
+    END { print roots+0, sysroots+0 }
+' "$fstab")"
+
+[[ "$root_entries" != 0 || "$sysroot_entries" != 0 ]] || exit 0
+if (( root_entries + sysroot_entries != 1 )); then
+    echo 'Refusing to migrate conflicting / and /sysroot entries in fstab' >&2
+    exit 1
+fi
+
+entry_target=/sysroot
+[[ "$root_entries" == 0 ]] || entry_target=/
+entry_type=$(findmnt --fstab --tab-file "$fstab" --noheadings --raw --mountpoint "$entry_target" --output FSTYPE)
+entry_uuid=$(findmnt --fstab --evaluate --tab-file "$fstab" --noheadings --raw --mountpoint "$entry_target" --output UUID)
+physical_uuid=$(findmnt --noheadings --raw --mountpoint /sysroot --output UUID)
+if [[ "$entry_type" != "$physical_type" || -z "$entry_uuid" || "$entry_uuid" != "$physical_uuid" ]]; then
+    echo 'Refusing to migrate an fstab entry that does not match the physical root' >&2
+    exit 1
+fi
+
+if [[ "$root_entries" == 1 ]]; then
+    # Keep the file's mode, ownership, SELinux label, comments and other entries.
+    temporary=$(mktemp "${fstab}.avethyos.XXXXXX")
+    trap 'rm -f "$temporary"' EXIT
+    cp --preserve=all "$fstab" "$temporary"
+    awk '
+        !/^[[:space:]]*#/ && $2 == "/" {
+            sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+\//, "&sysroot")
+        }
+        { print }
+    ' "$fstab" > "$temporary"
+    mv -f "$temporary" "$fstab"
+    trap - EXIT
+    echo 'Migrated physical root mount in fstab from / to /sysroot'
+fi
+
+# Keep the mounts established by the initramfs. Remounting the physical root ro
+# can also make /var and /home read-only when they share a Btrfs filesystem.
+# Filesystem options needed at first mount belong in the rootflags kernel arg.

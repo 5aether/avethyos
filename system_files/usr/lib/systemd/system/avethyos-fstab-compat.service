@@ -1,0 +1,18 @@
+[Unit]
+Description=Correct legacy composefs physical root mount configuration
+Documentation=https://bootc.dev/bootc/bootc-installation.7.html#finding-and-configuring-the-physical-root-filesystem
+DefaultDependencies=no
+ConditionPathExists=!/etc/initrd-release
+ConditionPathExists=/etc/fstab
+ConditionPathIsMountPoint=/sysroot
+After=bootc-fstab-edit.service systemd-fsck-root.service
+Before=systemd-remount-fs.service local-fs-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/avethyos-fstab-compat
+
+[Install]
+WantedBy=local-fs-pre.target

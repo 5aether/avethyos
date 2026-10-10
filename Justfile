@@ -106,6 +106,12 @@ build $target_image=image_name $tag=default_tag $variant="standard":
 
     BUILD_ARGS=()
     LABELS=()
+
+    # Resolve before the cached build so a new OGC release invalidates its layer.
+    OGC_KERNEL_DIGEST=$(podman run --rm --pull=newer ghcr.io/oras-project/oras:v1.3.4 \
+        resolve --full-reference "${OGC_KERNEL_REF:-ghcr.io/opengamingcollective/kernel-packages-fedora:latest-fc44}")
+    BUILD_ARGS+=(--build-arg "OGC_KERNEL_REF=${OGC_KERNEL_DIGEST}")
+
     if [[ -z "$(git status -s)" ]]; then
         GIT_SHA=$(git rev-parse --short HEAD)
         LABELS+=("--label" "io.artifacthub.package.readme-url=https://raw.githubusercontent.com/{{ repo_organization }}/{{ image_name }}/${GIT_SHA}/README.md")

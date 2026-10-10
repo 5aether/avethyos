@@ -4,6 +4,10 @@ set -euo pipefail
 dnf5 install -y --setopt=install_weak_deps=False \
     flatpak flatpak-session-helper accountsservice /usr/bin/curl
 
+mkdir -p /tmp/avethyos-flatpak-cache /tmp/avethyos-flatpak-triggers
+export XDG_CACHE_HOME=/tmp/avethyos-flatpak-cache
+export FLATPAK_TRIGGERSDIR=/tmp/avethyos-flatpak-triggers
+
 mkdir -p /etc/flatpak/installations.d /usr/share/flatpak/remotes.d
 install -m644 /ctx/flatpak/build.conf /etc/flatpak/installations.d/avethyos-build.conf
 curl --fail --location --retry 3 \
@@ -16,8 +20,19 @@ flatpak remote-add --installation=avethyos-build --if-not-exists --from \
     flathub \
     /usr/share/flatpak/remotes.d/flathub.flatpakrepo
 flatpak config --installation=avethyos-build --set languages '*'
-flatpak install --installation=avethyos-build -y --noninteractive flathub \
-    io.github.kolunmi.Bazaar com.github.tchx84.Flatseal
+for attempt in {1..5}; do
+    if flatpak install --installation=avethyos-build -y --noninteractive --or-update flathub \
+        io.github.kolunmi.Bazaar com.github.tchx84.Flatseal; then
+        break
+    else
+        status=$?
+    fi
+    if (( attempt == 5 )); then
+        exit "$status"
+    fi
+    printf 'Flatpak installation failed; retrying (%s/5)...\n' "$((attempt + 1))" >&2
+    sleep "$((attempt * 10))"
+done
 mkdir -p /usr/share/avethyos/flatpak-seed
 flatpak create-usb --installation=avethyos-build \
     /usr/share/avethyos/flatpak-seed \

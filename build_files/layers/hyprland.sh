@@ -6,7 +6,7 @@ dnf5 install -y --setopt=install_weak_deps=False \
     kitty grim slurp wl-clipboard jq \
     xorg-x11-server-Xwayland xdg-utils xdg-user-dirs \
     xdg-desktop-portal-hyprland xdg-desktop-portal-gtk \
-    dbus-tools polkit libnotify \
+    dbus-tools dbus-daemon polkit libnotify \
     NetworkManager NetworkManager-wifi bluez \
     pipewire pipewire-pulseaudio pipewire-alsa wireplumber
 

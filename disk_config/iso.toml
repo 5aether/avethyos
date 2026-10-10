@@ -2,6 +2,9 @@
 mountpoint = "/"
 minsize = "20 GiB"
 
+[customizations.iso]
+volume_id = "AvethyOS"
+
 [customizations.installer.modules]
 enable = [
   "org.fedoraproject.Anaconda.Modules.Storage",

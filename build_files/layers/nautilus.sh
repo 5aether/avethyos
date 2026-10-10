@@ -10,8 +10,9 @@ dnf5 install -y --setopt=install_weak_deps=False \
     gnome-keyring libsecret \
     gnome-online-accounts \
     gnome-disk-utility \
+    gparted \
     gnome-terminal-nautilus \
-    xdg-desktop-portal-gnome xdg-user-dirs xdg-user-dirs-gtk \
+    xdg-user-dirs xdg-user-dirs-gtk \
     ffmpegthumbnailer papers-thumbnailer gnome-epub-thumbnailer \
     gdk-pixbuf2-modules-extra glycin-loaders \
     webp-pixbuf-loader heif-pixbuf-loader avif-pixbuf-loader jxl-pixbuf-loader \

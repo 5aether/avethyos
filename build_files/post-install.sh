@@ -13,6 +13,9 @@ done
 
 dnf5 clean all
 
+# Apply branding after package installs so the initramfs includes AvethyOS names.
+bash /ctx/layers/branding.sh
+
 kernel_version=$(rpm -q kernel-core --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}\n')
 if [[ $kernel_version == *$'\n'* || $kernel_version != *-ogc* ]]; then
     printf 'Expected one installed OGC kernel-core package, got: %s\n' "$kernel_version" >&2

@@ -6,7 +6,8 @@ Before=systemd-user-sessions.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/flatpak preinstall --system -y --noninteractive --sideload-repo=/usr/share/avethyos/flatpak-seed
+ExecStartPre=/usr/bin/bash /usr/libexec/avethyos-flatpak-setup
+ExecStart=/usr/bin/flatpak preinstall --system -y --noninteractive --sideload-repo=/usr/share/avethyos/flatpak-seed/.ostree/repo
 TimeoutStartSec=10min
 RemainAfterExit=yes
 

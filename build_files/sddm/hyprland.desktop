@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Hyprland
 Exec=/usr/libexec/avethyos-start-hyprland
-TryExec=/usr/bin/Hyprland
+TryExec=/usr/bin/start-hyprland
 Type=Application
 DesktopNames=Hyprland

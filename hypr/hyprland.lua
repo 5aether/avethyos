@@ -6,7 +6,7 @@ hl.monitor({
 })
 
 local terminal    = "kitty"
-local fileManager = "thunar"
+local fileManager = "nautilus"
 local appmenu = "qs ipc call applauncher toggle"
 local control_center = "qs ipc call controlcenter toggle"
 local notifications = "qs ipc call clock toggle"

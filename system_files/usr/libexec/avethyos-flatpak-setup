@@ -1,0 +1,28 @@
+#!/bin/bash
+set -euo pipefail
+
+# remotes.d does not replace a Flathub remote inherited from an earlier OS.
+remote_list=$(flatpak remotes --system --columns=name,filter:full)
+flathub_found=false
+filter_path=""
+while IFS=$'\t' read -r remote_name remote_filter; do
+    if [[ "$remote_name" == flathub ]]; then
+        flathub_found=true
+        filter_path="$remote_filter"
+        break
+    fi
+done <<< "$remote_list"
+
+# remote-add --if-not-exists can still reset an existing remote's filter.
+if [[ "$flathub_found" == false ]]; then
+    flatpak remote-add --system --if-not-exists --from \
+        flathub /usr/share/flatpak/remotes.d/flathub.flatpakrepo
+fi
+flatpak remote-modify --system --collection-id=org.flathub.Stable flathub
+
+# A previous image may have supplied a filter that no longer exists. Keep any
+# valid user-selected filter, but remove stale paths so Flathub can be read.
+if [[ -n "$filter_path" && "$filter_path" != "-" && ! -f "$filter_path" ]]; then
+    printf 'Removing missing Flathub filter: %s\n' "$filter_path"
+    flatpak remote-modify --system --no-filter flathub
+fi

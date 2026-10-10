@@ -78,6 +78,12 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
 FROM base AS common
 
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
+    --mount=type=cache,dst=/var/cache \
+    --mount=type=cache,dst=/var/log \
+    --mount=type=tmpfs,dst=/tmp \
+    bash /ctx/layers/nautilus.sh
+
+RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
     --mount=type=bind,from=quickshell-build,source=/out,target=/theme \
     --mount=type=cache,dst=/var/cache \
     --mount=type=cache,dst=/var/log \

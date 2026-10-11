@@ -20,11 +20,6 @@ Rectangle {
         root.popupOpen = !root.popupOpen;
     }
 
-    IpcHandler {
-        target: "clock"
-        function toggle(): void { root.togglePopup(); }
-    }
-
     PopupFocus {
         popupWindow: popup
         opened: root.popupOpen
@@ -126,6 +121,45 @@ Rectangle {
     }
 
     PanelWindow {
+        id: glassBackdrop
+        visible: popupMotion.active
+        screen: popup.screen
+        anchors.top: true
+        margins.top: popup.margins.top
+        exclusionMode: ExclusionMode.Ignore
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.namespace: "quickshell:popup-backdrop"
+        implicitWidth: popup.width
+        implicitHeight: popup.height
+        color: "transparent"
+        mask: Region {}
+
+        AttachedGlass {
+            screen: popup.screen
+            active: popupMotion.active
+            sourceWindow: glassBackdrop
+            joinProgress: popupMotion.joinProgress
+            revealProgress: popupMotion.expansionProgress
+            flowProgress: popupMotion.progress
+            flowAnchor: Qt.vector2d(0.5, 0)
+            anchors { top: parent.top; left: parent.left; right: parent.right }
+            height: popup.height - 8
+            cornerRadius: popup.cornerRadius
+            attachRightEdge: false
+            color: Theme.barBackground
+            transform: [
+                Translate { y: popupMotion.offsetY },
+                Scale {
+                    origin.x: popupFrame.width / 2
+                    origin.y: 0
+                    xScale: popupMotion.scaleX
+                    yScale: popupMotion.scaleY
+                }
+            ]
+        }
+    }
+
+    PanelWindow {
         id: popup
         readonly property int cornerRadius: 20
         visible: popupMotion.active
@@ -134,8 +168,7 @@ Rectangle {
         margins.top: OverlayService.topMargin(screen)
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
-        // Reuse the bar-glass blur and stationary attached-popup rules.
-        WlrLayershell.namespace: "quickshell:popup-backdrop"
+        WlrLayershell.namespace: "quickshell:clock"
         focusable: root.popupOpen
         implicitWidth: 720 + 2 * cornerRadius
         // Fixed height that fits the largest month (6 week rows) with a little
@@ -143,12 +176,14 @@ Rectangle {
         // + row spacing 6 + 6 rows of 30 + padding 18.
         implicitHeight: 329 + cornerRadius + 8
         color: "transparent"
-        mask: Region { item: popupFrame }
+        mask: PopupRegion { surfaceItem: popupFrame; motion: popupMotion }
 
         AttachedPanel {
             id: popupFrame
+            joinProgress: popupMotion.joinProgress
+            revealProgress: popupMotion.expansionProgress
+            contentOpacity: popupMotion.contentOpacity
             flowProgress: popupMotion.progress
-            flowStrength: 0.075
             flowAnchor: Qt.vector2d(0.5, 0)
             anchors { top: parent.top; left: parent.left; right: parent.right }
             height: popup.height - 8
@@ -164,9 +199,7 @@ Rectangle {
             ]
             cornerRadius: popup.cornerRadius
             attachRightEdge: false
-            // A slightly stronger tint keeps the blurred window unobtrusive.
-            color: Qt.rgba(Theme.colors.base.r, Theme.colors.base.g,
-                           Theme.colors.base.b, 0.68)
+            color: "transparent"
 
             RowLayout {
                 anchors.fill: parent

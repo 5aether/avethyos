@@ -11,8 +11,9 @@ Rectangle {
     property bool popupOpen: false
 
     onPopupOpenChanged: {
-        OsdService.controlCenterOpen = popupOpen;
+        OsdService.setControlCenterOpen(root, popupOpen);
         if (!popupOpen) {
+            brightnessRefreshTimer.stop();
             closeToggleMenus();
             controlTray.closeMenus();
             cancelSessionAction();
@@ -48,20 +49,21 @@ Rectangle {
             refresh();
     }
 
-    IpcHandler {
-        target: "controlcenter"
-        function toggle(): void { root.togglePopup(); }
-        function close(): void { root.popupOpen = false; }
-        function menu(name: string): void {
-            if (["network", "bluetooth", "wallpaper", "nightLight"].indexOf(name) < 0) return;
-            if (!root.popupOpen) root.togglePopup();
-            root.openMenu(name);
+    // Map glass below the controls in the same pass, as notifications do.
+    function syncPopupWindows(): void {
+        if (popupMotion.active) {
+            glassBackdrop.visible = true;
+            popup.visible = true;
+        } else {
+            popup.visible = false;
+            glassBackdrop.visible = false;
         }
     }
 
     PopupFocus {
         id: popupFocus
         popupWindow: popup
+        extraWindows: sessionDialogWindow.visible ? [sessionDialogWindow] : []
         opened: root.popupOpen
         dismissAction: () => { root.popupOpen = false; }
         onDismissed: controlTray.closeMenus()
@@ -71,6 +73,12 @@ Rectangle {
     // -1 means "unknown": ddcutil is missing or the monitor has no DDC/CI
     // support. The UI shows a dash instead of inventing a percentage.
     property int brightness: -1
+    property var brightnessByDisplay: ({})
+    property var brightnessRevisions: ({})
+    property var pendingBrightnessWrites: []
+    property bool brightnessRefreshPending: false
+    readonly property bool brightnessLoading: brightnessRefreshPending
+        || (brightnessQuery.running && brightnessQuery.display === selectedDisplay)
     readonly property var outputs: AudioService.outputs
     readonly property int defaultOutput: AudioService.output ? AudioService.output.id : -1
     property bool devicesOpen: false
@@ -81,6 +89,11 @@ Rectangle {
     // ddcutil display numbering starts at 1. Starting there lets the quick
     // brightness read run in parallel with the slower monitor discovery.
     property int selectedDisplay: 1
+    onSelectedDisplayChanged: {
+        const saved = brightnessByDisplay[selectedDisplay];
+        brightness = saved ? saved.level : -1;
+        requestBrightness();
+    }
     // The shared picker replaces the slider row. Its height follows the
     // visible entries, rather than leaving a large empty panel for one device.
     readonly property int sliderMenuHeight: deviceLayoutOpen
@@ -106,6 +119,16 @@ Rectangle {
                                            || wallpaperLayoutOpen || nightLightLayoutOpen
     property var pendingSessionCommand: null
     property bool sessionConfirmationOpen: false
+    property real sessionBlurProgress: sessionConfirmationOpen ? 1 : 0
+    readonly property bool sessionBlurActive: sessionConfirmationMotion.active || sessionBlurProgress > 0
+    Behavior on sessionBlurProgress {
+        id: sessionBlurBehavior
+        NumberAnimation {
+            duration: sessionBlurBehavior.targetValue === 1 ? 800 : 500
+            // Move immediately on click, then ease gently into the full blur.
+            easing.type: sessionBlurBehavior.targetValue === 1 ? Easing.OutSine : Easing.InOutSine
+        }
+    }
     property string pendingSessionLabel: ""
     property string pendingSessionIcon: ""
     readonly property string trayDate: Qt.formatDate(new Date(), "dddd d MMMM yyyy")
@@ -134,14 +157,19 @@ Rectangle {
     }
 
     function requestSessionAction(command, label, icon) {
+        popupFocus.preservePopupOnNextClear();
         pendingSessionCommand = command;
         pendingSessionLabel = label;
         pendingSessionIcon = icon;
         sessionConfirmationOpen = true;
+        sessionConfirmation.forceActiveFocus();
     }
 
     function cancelSessionAction() {
+        if (sessionConfirmationOpen && popupOpen)
+            popupFocus.preservePopupOnNextClear();
         sessionConfirmationOpen = false;
+        panelSurface.forceActiveFocus();
     }
 
     function confirmSessionAction() {
@@ -169,11 +197,12 @@ Rectangle {
     PopupMotion {
         id: popupMotion
         opened: root.popupOpen
-        openDuration: 340
-        closeDuration: 230
+        frameDriven: true
+        frameSource: popup.contentItem.Window.window
+        openDuration: 260
         distance: panelSurface.height
-        horizontalDistance: panelSurface.width
-        scaleOnOpen: false
+        onActiveChanged: root.syncPopupWindows()
+        onSettled: root.refresh()
     }
     PopupMotion {
         id: sessionConfirmationMotion
@@ -254,11 +283,109 @@ Rectangle {
 
     // Discover once at startup so the initial brightness slider can select the
     // first display without requiring the display picker to be opened first.
-    Component.onCompleted: root.refreshMonitors()
+    Component.onCompleted: {
+        root.syncPopupWindows();
+        root.refreshMonitors();
+    }
+    Component.onDestruction: {
+        // A live reload can still be destroying views from the previous
+        // singleton revision while the replacement method is unavailable.
+        if (typeof OsdService.setControlCenterOpen === "function")
+            OsdService.setControlCenterOpen(root, false);
+    }
     function refresh() {
-        // Refresh the selected display when the popup is opened.
-        if (root.selectedDisplay >= 0 && !brightnessQuery.running)
-            brightnessQuery.running = true;
+        // Show the cached level immediately. DDC discovery can hold up GPU
+        // rendering even from another process, so read after the reveal.
+        if (popupOpen && popupMotion.progress === 1)
+            brightnessRefreshTimer.restart();
+    }
+
+    Timer {
+        id: brightnessRefreshTimer
+        interval: 120
+        onTriggered: {
+            if (root.popupOpen && popupMotion.progress === 1)
+                root.requestBrightness();
+        }
+    }
+
+    function brightnessTarget(display) {
+        const monitor = monitors.find(entry => entry.id === display);
+        return monitor && Number.isInteger(monitor.bus) && monitor.bus >= 0
+            ? ["--bus", String(monitor.bus)] : ["--display", String(display)];
+    }
+
+    function brightnessRevision(display) {
+        return brightnessRevisions[display] || 0;
+    }
+
+    function rememberBrightness(display, level, maximum) {
+        const previous = brightnessByDisplay[display];
+        const saved = { level: level,
+            maximum: maximum || (previous ? previous.maximum : 100) };
+        brightnessByDisplay = Object.assign({}, brightnessByDisplay, { [display]: saved });
+        if (display === selectedDisplay)
+            brightness = level;
+    }
+
+    function moveBrightness(value) {
+        OsdService.suppressBrightness();
+        brightnessRevisions = Object.assign({}, brightnessRevisions,
+            { [selectedDisplay]: brightnessRevision(selectedDisplay) + 1 });
+        rememberBrightness(selectedDisplay, Math.round(value));
+    }
+
+    function requestBrightness() {
+        brightnessRefreshPending = selectedDisplay > 0;
+        if (!brightnessRefreshPending || brightnessQuery.running
+                || brightnessWrite.running || pendingBrightnessWrites.length > 0)
+            return;
+        brightnessRefreshPending = false;
+        // Freeze the target and edit revision for this process. Selecting a
+        // different monitor never changes the identity of an in-flight read.
+        brightnessQuery.display = selectedDisplay;
+        brightnessQuery.revision = brightnessRevision(selectedDisplay);
+        brightnessQuery.output = "";
+        brightnessQuery.running = true;
+    }
+
+    function finishBrightnessRead(exitCode) {
+        const display = brightnessQuery.display;
+        if (brightnessQuery.revision === brightnessRevision(display)) {
+            const match = brightnessQuery.output.match(/VCP\s+10\s+C\s+(\d+)\s+(\d+)/i);
+            const maximum = match ? Number(match[2]) : 0;
+            const level = exitCode === 0 && maximum > 0
+                ? Math.round(Number(match[1]) * 100 / maximum) : -1;
+            rememberBrightness(display, level >= 0 && level <= 100 ? level : -1, maximum);
+        }
+        Qt.callLater(continueBrightnessWork);
+    }
+
+    function commitBrightness(value) {
+        const display = selectedDisplay;
+        const saved = brightnessByDisplay[display];
+        const level = Math.round(Math.max(0, Math.min(100, value)));
+        // Coalesce rapid wheel/keyboard changes for the same monitor while
+        // preserving writes for other monitors that were selected meanwhile.
+        const queued = pendingBrightnessWrites.filter(write => write.display !== display);
+        queued.push({ display: display, level: Math.round(level * (saved ? saved.maximum : 100) / 100) });
+        pendingBrightnessWrites = queued;
+        brightnessRefreshPending = true;
+        continueBrightnessWork();
+    }
+
+    function continueBrightnessWork() {
+        if (brightnessQuery.running || brightnessWrite.running)
+            return;
+        if (pendingBrightnessWrites.length > 0) {
+            const next = pendingBrightnessWrites[0];
+            pendingBrightnessWrites = pendingBrightnessWrites.slice(1);
+            brightnessWrite.display = next.display;
+            brightnessWrite.level = next.level;
+            brightnessWrite.running = true;
+        } else if (brightnessRefreshPending) {
+            requestBrightness();
+        }
     }
 
     function setVolume(value) {
@@ -271,8 +398,7 @@ Rectangle {
     function refreshMonitors() {
         if (!monitorsQuery.running) monitorsQuery.running = true;
         // Re-read the level for whichever panel is now selected.
-        if (root.selectedDisplay >= 0 && !brightnessQuery.running)
-            brightnessQuery.running = true;
+        requestBrightness();
         if (!friendlyQuery.running) friendlyQuery.running = true;
     }
 
@@ -341,23 +467,28 @@ Rectangle {
 
     Process {
         id: brightnessQuery
-        command: ["ddcutil", "getvcp", "10", "--terse", "--noverify",
-                  "--display", String(root.selectedDisplay)]
+        property int display: 1
+        property int revision: 0
+        property string output: ""
+        command: ["ddcutil", "getvcp", "10", "--terse", "--noverify"]
+            .concat(root.brightnessTarget(display))
         stdout: StdioCollector {
-            onStreamFinished: {
-                const match = text.match(/VCP\s+10\s+C\s+(\d+)\s+(\d+)/i);
-                if (match && !brightnessSlider.dragging) {
-                    const current = Math.round(Number(match[1]) * 100 / Number(match[2]));
-                    root.brightness = current >= 0 && current <= 100 ? current : -1;
-                }
-            }
+            onStreamFinished: brightnessQuery.output = text
         }
         // A non-zero exit means the display does not speak DDC/CI (or ddcutil
         // is not installed). Report "unknown" rather than a stale percentage.
-        onExited: (exitCode, exitStatus) => {
-            if (exitCode !== 0)
-                root.brightness = -1;
-        }
+        onExited: (exitCode, exitStatus) => root.finishBrightnessRead(exitCode)
+    }
+
+    Process {
+        id: brightnessWrite
+        property int display: 1
+        property int level: 0
+        command: ["ddcutil", "setvcp", "10", String(level)]
+            .concat(root.brightnessTarget(display))
+        // Read back only after the write finishes, so a quick monitor switch
+        // cannot replace the new slider level with the pre-write value.
+        onExited: Qt.callLater(root.continueBrightnessWork)
     }
 
     Process {
@@ -375,12 +506,18 @@ Rectangle {
                             id: Number(displayMatch[1]),
                             description: "Display " + displayMatch[1],
                             connector: "",
+                            bus: -1,
                             model: ""
                         };
                         found.push(current);
                         continue;
                     }
                     if (!current) continue;
+                    const busMatch = lines[i].match(/^\s*I2C bus:\s*\/dev\/i2c-(\d+)/);
+                    if (busMatch) {
+                        current.bus = Number(busMatch[1]);
+                        continue;
+                    }
                     // Keep the connector and the model name apart: the connector
                     // is shown as a dim subtitle, the model as the label, and
                     // the friendly EDID name wins over both when it is read.
@@ -402,8 +539,8 @@ Rectangle {
                     root.selectedDisplay = found[0].id;
                 if (found.length === 0)
                     root.brightness = -1;
-                else if (!brightnessQuery.running)
-                    brightnessQuery.running = true;
+                else
+                    root.requestBrightness();
                 // ddcutil names the port, not the panel. The
                 // friendly name comes from the monitor's EDID, so read it and
                 // prefer it, keeping the connector only as a fallback.
@@ -484,18 +621,69 @@ Rectangle {
         }
     }
 
+    Component {
+        id: controlGlassBackground
+
+        BlurWave {
+            anchors.fill: parent
+            progress: root.sessionBlurProgress
+            compensateBackground: true
+            joinHeight: sessionBlurWave.joinHeight
+            dialogBounds: sessionBlurWave.dialogBounds
+            dialogRadius: sessionBlurWave.dialogRadius
+            feather: sessionBlurWave.feather
+        }
+    }
+
+    PanelWindow {
+        id: glassBackdrop
+        visible: false
+        screen: popup.screen
+        anchors { top: true; right: true }
+        margins.top: popup.margins.top
+        exclusionMode: ExclusionMode.Ignore
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.namespace: "quickshell:popup-backdrop"
+        implicitWidth: popup.width
+        implicitHeight: popup.height
+        color: "transparent"
+        mask: Region {}
+
+        AttachedGlass {
+            screen: popup.screen
+            active: popupMotion.active
+            sourceWindow: glassBackdrop
+            joinProgress: popupMotion.joinProgress
+            revealProgress: popupMotion.expansionProgress
+            flowProgress: popupMotion.progress
+            flowAnchor: Qt.vector2d(1, 0)
+            x: popupMotion.offsetX
+            y: popupMotion.offsetY
+            width: popup.width
+            height: popup.visualHeight + popup.cornerRadius
+            cornerRadius: popup.cornerRadius
+            color: Theme.barBackground
+            backgroundContent: controlGlassBackground
+            transform: Scale {
+                origin.x: panelSurface.width
+                origin.y: 0
+                xScale: popupMotion.scaleX
+                yScale: popupMotion.scaleY
+            }
+        }
+    }
+
     PanelWindow {
         id: popup
         readonly property int cornerRadius: 20
-        visible: popupMotion.active
+        visible: false
         screen: root.QsWindow.window?.screen ?? null
         anchors { top: true; right: true }
         margins.top: OverlayService.topMargin(screen)
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
-        // Reuse the bar-glass blur and stationary attached-popup rules.
-        WlrLayershell.namespace: "quickshell:popup-backdrop"
-        focusable: root.popupOpen
+        WlrLayershell.namespace: "quickshell:controlcenter"
+        focusable: root.popupOpen && !root.sessionConfirmationOpen
         implicitWidth: 420 + cornerRadius
         readonly property real panelHeight: root.toggleMenuVisible
             ? 106 + (root.networkLayoutOpen ? root.networkPanelHeight
@@ -515,11 +703,14 @@ Rectangle {
                 easing.type: Easing.OutCubic
             }
         }
-        mask: Region { item: panelSurface }
+        mask: PopupRegion { surfaceItem: panelSurface; motion: popupMotion }
         color: "transparent"
 
-        AttachedPanel {
+        Item {
             id: panelSurface
+            readonly property real revealedHeight: Math.min(height, 3 * popup.cornerRadius)
+                * popupMotion.joinProgress + Math.max(0, height - 3 * popup.cornerRadius)
+                * popupMotion.expansionProgress
             focus: root.popupOpen
             Keys.onEscapePressed: event => {
                 if (root.sessionConfirmationOpen) root.cancelSessionAction();
@@ -530,18 +721,11 @@ Rectangle {
                 } else root.popupOpen = false;
                 event.accepted = true;
             }
-            flowProgress: popupMotion.progress
-            flowStrength: 0.12
-            flowAnchor: Qt.vector2d(1, 0)
             // Position bindings also keep the window's click region in step.
             x: popupMotion.offsetX
             y: popupMotion.offsetY
             width: parent.width
             height: popup.visualHeight + popup.cornerRadius
-            cornerRadius: popup.cornerRadius
-            // A slightly stronger tint keeps the blurred window unobtrusive.
-            color: Qt.rgba(Theme.colors.base.r, Theme.colors.base.g,
-                           Theme.colors.base.b, 0.68)
             enabled: root.popupOpen
             transform: Scale {
                 origin.x: panelSurface.width
@@ -550,12 +734,24 @@ Rectangle {
                 yScale: popupMotion.scaleY
             }
 
+            // As in notifications, animate a viewport over a fixed layout.
+            // Keep text and controls out of the glass's offscreen texture.
+            Item {
+                id: controlReveal
+                width: panelSurface.width
+                height: Math.max(0, panelSurface.revealedHeight
+                    - popup.cornerRadius * popupMotion.joinProgress)
+                opacity: popupMotion.contentOpacity
+                clip: true
+            }
+
             Item {
                 id: controlViewport
-                anchors.fill: parent
-                anchors.margins: 16
-                anchors.leftMargin: 16 + popup.cornerRadius
-                anchors.bottomMargin: 16 + popup.cornerRadius
+                parent: controlReveal
+                x: 16 + popup.cornerRadius
+                y: 16
+                width: panelSurface.width - 32 - popup.cornerRadius
+                height: panelSurface.height - 32 - popup.cornerRadius
                 clip: true
 
             ColumnLayout {
@@ -575,7 +771,7 @@ Rectangle {
                     radius: 22
                     color: Theme.popupSurface0
 
-                    readonly property bool userHovered: userSummaryHover.hovered
+                    readonly property bool userHovered: (userSummaryHover.hovered || headerSessionButtons.hovered)
                         && !root.toggleMenuVisible && root.pendingSessionCommand === null
                     property real hoverProgress: userHovered ? 1 : 0
                     Behavior on hoverProgress {
@@ -685,6 +881,13 @@ Rectangle {
 
                     Row {
                         id: headerSessionButtons
+                        readonly property bool hovered: {
+                            for (let index = 0; index < sessionButtonRepeater.count; ++index) {
+                                if (sessionButtonRepeater.itemAt(index)?.hovered)
+                                    return true;
+                            }
+                            return false;
+                        }
                         z: 1
                         anchors.right: parent.right
                         anchors.rightMargin: 10
@@ -693,7 +896,9 @@ Rectangle {
                         // Reveal after the uptime clears this space, and
                         // hide first when the pointer leaves the card.
                         visible: !root.toggleMenuVisible && sessionButtonsMotion.active
-                        enabled: userSummary.userHovered && userSummary.hoverProgress >= 0.99
+                        // Keep input alive while crossing from the card into
+                        // a button's MouseArea, which owns that hover event.
+                        enabled: !root.sessionBlurActive
                         transform: [
                             Translate { y: sessionButtonsMotion.offsetY },
                             Scale {
@@ -713,6 +918,7 @@ Rectangle {
                         }
 
                         Repeater {
+                            id: sessionButtonRepeater
                             model: [
                                 { icon: "lock", label: "Lock screen", command: ["loginctl", "lock-session"], danger: false },
                                 { icon: "logout", label: "Log out", command: ["hyprctl", "dispatch", "exit"], danger: false },
@@ -721,6 +927,7 @@ Rectangle {
                             ]
                             delegate: Item {
                                 required property var modelData
+                                readonly property bool hovered: headerSessionMouse.containsMouse
                                 width: 22
                                 height: 30
                                 Text {
@@ -755,57 +962,6 @@ Rectangle {
                         icon: "arrow_back"
                         Accessible.name: "Back to control center"
                         onClicked: root.closeToggleMenus()
-                    }
-
-                    Rectangle {
-                        id: sessionConfirmation
-                        anchors.fill: parent
-                        z: 2
-                        visible: sessionConfirmationMotion.active
-                        enabled: root.sessionConfirmationOpen
-                        radius: parent.radius
-                        color: Theme.popupSurface1
-                        transform: [
-                            Translate { y: sessionConfirmationMotion.offsetY },
-                            Scale {
-                                origin.x: sessionConfirmation.width / 2
-                                origin.y: 0
-                                xScale: sessionConfirmationMotion.scaleX
-                                yScale: sessionConfirmationMotion.scaleY
-                            }
-                        ]
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 9
-                            spacing: 8
-                            Text {
-                                text: root.pendingSessionIcon
-                                color: Theme.colors.red
-                                font.family: Theme.iconFamily
-                                font.pixelSize: 18
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: root.pendingSessionLabel + "?"
-                                color: Theme.colors.text
-                                font.family: Theme.textFamily
-                                font.pixelSize: 12
-                                font.bold: true
-                            }
-                            ControlButton {
-                                icon: "close"
-                                Accessible.name: "Cancel session action"
-                                onClicked: root.cancelSessionAction()
-                            }
-                            ControlButton {
-                                icon: "check"
-                                danger: true
-                                Accessible.name: "Confirm session action"
-                                onClicked: root.confirmSessionAction()
-                            }
-                        }
                     }
                 }
 
@@ -989,10 +1145,10 @@ Rectangle {
                                 opacity: enabled ? 1 : 0.45
                                 icon: "brightness_6"
                                 label: "Brightness"
-                                valueText: root.brightness < 0 ? "N/A" : root.brightness + "%"
+                                valueText: root.brightness < 0 ? (root.brightnessLoading ? "…" : "N/A") : root.brightness + "%"
                                 accent: Theme.colors.mauve
-                                onMoved: value => { OsdService.suppressBrightness(); root.brightness = Math.round(value); }
-                                onCommitted: value => Quickshell.execDetached(["ddcutil", "setvcp", "10", String(Math.round(value)), "--display", String(root.selectedDisplay)])
+                                onMoved: value => root.moveBrightness(value)
+                                onCommitted: value => root.commitBrightness(value)
                             }
                         }
                     }
@@ -1080,8 +1236,10 @@ Rectangle {
                                 subtitle: (monitor.connector || "Display " + monitor.id).replace(/^card\d+-/, "")
                             }))
                             onSelected: entry => {
-                                root.selectedDisplay = entry.id;
-                                if (!brightnessQuery.running) brightnessQuery.running = true;
+                                if (root.selectedDisplay === entry.id)
+                                    root.requestBrightness();
+                                else
+                                    root.selectedDisplay = entry.id;
                             }
                         }
                     }
@@ -1149,6 +1307,17 @@ Rectangle {
 
             }
 
+            // Block pointer input without changing the underlying controls'
+            // enabled appearance ahead of the wave. Keep blocking on exit.
+            MouseArea {
+                anchors.fill: parent
+                z: 1
+                visible: root.sessionBlurActive
+                hoverEnabled: true
+                acceptedButtons: Qt.AllButtons
+                onWheel: event => { event.accepted = true; }
+            }
+
             // Observe from the shared parent: a sibling overlay here steals
             // hover from the user card even with blocking disabled.
             HoverHandler {
@@ -1159,6 +1328,155 @@ Rectangle {
                 }
                 onHoveredChanged: dismissTrayMenuAboveControls()
                 onPointChanged: dismissTrayMenuAboveControls()
+            }
+        }
+    }
+
+    // Map the wave after the controls and the dialog after the wave. A hidden
+    // confirmation window must not participate in the header's pointer input.
+    PanelWindow {
+        id: sessionBlurWindow
+        visible: popup.backingWindowVisible && root.sessionBlurActive
+        screen: popup.screen
+        anchors { top: true; right: true }
+        margins.top: popup.margins.top
+        exclusionMode: ExclusionMode.Ignore
+        WlrLayershell.layer: WlrLayer.Overlay
+        // Reuse the bar's existing blur rule, including its live background.
+        WlrLayershell.namespace: "quickshell:popup-backdrop"
+        implicitWidth: popup.width
+        implicitHeight: popup.height
+        color: "transparent"
+        mask: Region {}
+
+        AttachedPanel {
+            id: sessionBlurSurface
+            visible: root.sessionBlurActive
+            x: panelSurface.x
+            y: panelSurface.y
+            width: panelSurface.width
+            height: panelSurface.height
+            cornerRadius: popup.cornerRadius
+            joinProgress: popupMotion.joinProgress
+            revealProgress: popupMotion.expansionProgress
+            contentOpacity: popupMotion.contentOpacity
+            color: "transparent"
+            // Oversample the wave at three times the screen's physical
+            // resolution; a floating-point layer preserves its soft gradient.
+            readonly property real renderScale: 3 * sessionBlurWindow.devicePixelRatio
+            layer.textureSize: Qt.size(Math.ceil(width * renderScale),
+                Math.ceil(height * renderScale))
+            layer.format: ShaderEffectSource.RGBA16F
+            transform: Scale {
+                origin.x: panelSurface.width
+                origin.y: 0
+                xScale: popupMotion.scaleX
+                yScale: popupMotion.scaleY
+            }
+
+            BlurWave {
+                id: sessionBlurWave
+                anchors.fill: parent
+                progress: root.sessionBlurProgress
+                joinHeight: popup.margins.top > 0 ? popup.cornerRadius * 2 : 0
+                // Both native windows share the panel's coordinates and transform.
+                dialogBounds: Qt.vector4d(sessionConfirmation.x, sessionConfirmation.y,
+                    sessionConfirmation.width, sessionConfirmation.height)
+                dialogRadius: sessionConfirmation.radius
+            }
+        }
+    }
+
+    PanelWindow {
+        id: sessionDialogWindow
+        visible: popupMotion.active && sessionConfirmationMotion.active
+            && sessionBlurWindow.backingWindowVisible
+        screen: popup.screen
+        anchors { top: true; right: true }
+        margins.top: popup.margins.top
+        exclusionMode: ExclusionMode.Ignore
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.namespace: "quickshell:controlcenter"
+        implicitWidth: popup.width
+        implicitHeight: popup.height
+        color: "transparent"
+        focusable: root.sessionConfirmationOpen
+        mask: Region { item: sessionConfirmation }
+
+        Item {
+            x: panelSurface.x
+            y: panelSurface.y
+            width: panelSurface.width
+            height: panelSurface.height
+            opacity: popupMotion.contentOpacity
+            transform: Scale {
+                origin.x: panelSurface.width
+                origin.y: 0
+                xScale: popupMotion.scaleX
+                yScale: popupMotion.scaleY
+            }
+
+            // Render above the native blur, at the user card's position.
+            Rectangle {
+                id: sessionConfirmation
+                x: controlViewport.x + userSummary.x
+                y: controlViewport.y + userSummary.y
+                width: userSummary.width
+                height: userSummary.height
+                z: 2
+                visible: sessionConfirmationMotion.active
+                enabled: root.sessionConfirmationOpen
+                radius: userSummary.radius
+                color: Theme.colors.surface1
+
+                Keys.onEscapePressed: event => {
+                    root.cancelSessionAction();
+                    event.accepted = true;
+                }
+                Keys.onTabPressed: event => {
+                    if (sessionCancelButton.activeFocus) sessionConfirmButton.forceActiveFocus();
+                    else sessionCancelButton.forceActiveFocus();
+                    event.accepted = true;
+                }
+                Keys.onBacktabPressed: event => {
+                    if (sessionConfirmButton.activeFocus) sessionCancelButton.forceActiveFocus();
+                    else sessionConfirmButton.forceActiveFocus();
+                    event.accepted = true;
+                }
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 9
+                    spacing: 8
+                    Text {
+                        text: root.pendingSessionIcon
+                        color: Theme.colors.red
+                        font.family: Theme.iconFamily
+                        font.pixelSize: 18
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: root.pendingSessionLabel + "?"
+                        color: Theme.colors.text
+                        font.family: Theme.textFamily
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
+                    ControlButton {
+                        id: sessionCancelButton
+                        icon: "close"
+                        Accessible.name: "Cancel session action"
+                        onClicked: root.cancelSessionAction()
+                    }
+                    ControlButton {
+                        id: sessionConfirmButton
+                        icon: "check"
+                        danger: true
+                        Accessible.name: "Confirm session action"
+                        onClicked: root.confirmSessionAction()
+                    }
+                }
             }
         }
     }

@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const serviceSource = fs.readFileSync(path.join(__dirname, "..", "components", "NowPlayingService.qml"), "utf8");
 const viewSource = fs.readFileSync(path.join(__dirname, "..", "widgets", "MediaTrackView.qml"), "utf8");
 const overlaySource = fs.readFileSync(path.join(__dirname, "..", "components", "OverlayService.qml"), "utf8");
+const carrierSource = fs.readFileSync(path.join(__dirname, "..", "overlays", "MediaTransfer.qml"), "utf8");
 
 // Execute the production QML JavaScript with deterministic animation/timer
 // boundaries. No MPRIS or compositor is required, and no player is modified.
@@ -70,6 +71,9 @@ function makeView(mode) {
         targetTrack: null,
         motionPhase: "idle",
         slideProgress: 0,
+        trackHistory: [],
+        historyIndex: -1,
+        swipeDirection: 1,
         activeBuffer: 0,
         Image: { Loading: 2, Ready: 1, Error: 3 },
         Qt: { callLater(fn) { deferred.push(fn); } },
@@ -167,6 +171,40 @@ function makePlayer(number = 1, extra = {}) {
     };
 }
 
+function makeCarrier(service) {
+    const screen = { width: 1920, height: 1080 };
+    const context = vm.createContext({
+        NowPlayingService: service,
+        Theme: { radius: 12 },
+        Qt: { callLater() {} },
+        activeSerial: service.transferSerial,
+        awaitingStart: true,
+        backingWindowVisible: true,
+        contentItem: { width: screen.width },
+        destinationMotion: null,
+        sourceView: null,
+        progress: 0,
+        departure: {
+            cover: { x: 1400, y: 5, width: 32, height: 32, radius: 12 },
+            title: { x: 1440, y: 8, width: 170, height: 14 },
+        },
+        arrival: {
+            cover: { x: 1574, y: 62, width: 42, height: 42, radius: 12 },
+            title: { x: 1627, y: 75, width: 276, height: 17 },
+            bounds: { x: 1574, y: 54, width: 329, height: 58 },
+        },
+        flight: { running: false, start() { this.running = true; } },
+    });
+    context.root = context;
+    installFunctions(carrierSource, context);
+    for (const name of ["bend"]) {
+        const expression = carrierSource.match(new RegExp(
+            "^    readonly property (?:bool|real) " + name + ": ([^\\n]+(?:\\n        \\?[^\\n]+)?)", "m"))[1];
+        Object.defineProperty(context, name, { get() { return vm.runInContext(expression, context); } });
+    }
+    return context;
+}
+
 test("overlay placement distinguishes real fullscreen from maximized windows on its own output", () => {
     const context = vm.createContext({
         Hyprland: { monitorFor(screen) { return screen.monitor; } },
@@ -202,6 +240,8 @@ function makeService() {
             selectCurrentPlayer() { this.selectedPlayer = this.player; },
         },
         OsdService: { overlayVisible: false },
+        OverlayService: { topMargin() { return 42; } },
+        Hyprland: { focusedMonitor: null },
         transferRequested(serial) {
             transfers.push({ serial, from: context.transferFrom, to: context.transferTo,
                 track: context.transferTrack });
@@ -231,7 +271,11 @@ function makeService() {
             if (!context.MediaService.selectedPlayer) context.MediaService.selectedPlayer = player;
             context.refresh();
         },
-        finishTransfer() { context.finishTransfer(context.transferSerial); },
+        startTransfer() { context.startTransfer(context.transferSerial); },
+        finishTransfer() {
+            if (context.moving && !context.transferReady) this.startTransfer();
+            context.finishTransfer(context.transferSerial);
+        },
         flush() {
             while (deferred.length) deferred.shift()();
         },
@@ -273,7 +317,7 @@ test("first playback belongs to the toast until its return flight finishes", () 
     assert.equal(s.barView.displayedTrack.title, "Track 1");
 });
 
-test("track changes carry the previous bar song before swiping the new song in from the right", () => {
+test("the song reaches the toast before the new song starts scrolling in", () => {
     const h = makeService();
     const s = h.service;
     h.update(makePlayer());
@@ -283,19 +327,227 @@ test("track changes carry the previous bar song before swiping the new song in f
     assert.equal(s.transferTo, "toast");
     assert.equal(s.transferTrack.title, "Track 1");
     assert.equal(s.toastView.displayedTrack.title, "Track 1");
+    h.startTransfer();
+    assert.equal(s.transferReady, true);
+    assert.equal(s.toastView.motionPhase, "idle");
+    assert.equal(s.toastView.displayedTrack.title, "Track 1");
     h.finishTransfer();
-    assert.equal(s.toastView.motionPhase, "preload");
     assert.equal(s.toastView.displayedTrack.title, "Track 1");
     assert.equal(s.toastView.targetTrack.title, "Track 2");
+    assert.equal(s.toastView.motionPhase, "preload");
     s.toastView.beginSwipe();
     s.toastView.swipe.sample(0.5);
-    assert.ok(s.toastView.activeCard.contentItem.x < 0, "old card travels left");
-    assert.ok(s.toastView.nextCard.contentItem.x > 0, "new card enters from right");
-    assert.equal(s.toastView.displayedTrack.title, "Track 1", "freeze outgoing metadata throughout motion");
+    assert.ok(s.toastView.activeCard.contentItem.x < 0, "old song scrolls left after landing");
+    assert.ok(s.toastView.nextCard.contentItem.x > 0, "new song enters from the right");
+    assert.equal(s.toastView.displayedTrack.title, "Track 1", "outgoing metadata stays frozen");
     s.toastView.completeSwipe();
     assert.equal(s.toastView.displayedTrack.title, "Track 2");
     assert.equal(s.toastView.motionPhase, "idle");
     assert.equal(s.toastView.activeCard.contentItem.x, 0);
+});
+
+test("the carrier lands at the now-playing position before starting the song swipe", () => {
+    const h = makeService();
+    const s = h.service;
+    h.update(makePlayer(1));
+    h.landOnBar();
+    h.update(makePlayer(2));
+    const carrier = makeCarrier(s);
+    carrier.startFlight();
+    assert.equal(carrier.flight.running, true);
+    for (const fraction of [0.01, 0.25, 0.5]) {
+        carrier.progress = fraction;
+        const cover = carrier.renderedPart("cover");
+        assert.ok(cover.y > carrier.departure.cover.y);
+        assert.ok(cover.x > carrier.departure.cover.x && cover.x < carrier.arrival.cover.x);
+        assert.equal(s.toastView.motionPhase, "idle", "the scroll waits for the flight to finish");
+    }
+    carrier.progress = 1;
+    const landed = carrier.renderedPart("cover");
+    assert.equal(landed.x, carrier.arrival.cover.x);
+    assert.equal(landed.y, carrier.arrival.cover.y);
+    assert.equal(landed.width, carrier.arrival.cover.width);
+    h.finishTransfer();
+    assert.equal(s.toastView.displayedTrack.title, "Track 1");
+    assert.equal(s.toastView.motionPhase, "preload");
+    s.toastView.completeSwipe();
+    assert.equal(s.toastView.displayedTrack.title, "Track 2");
+    assert.equal(s.toastView.motionPhase, "idle");
+});
+
+test("returning to the previous song with a new playback ID reverses the scroll after landing", () => {
+    const h = makeService();
+    const s = h.service;
+    h.update(makePlayer(1));
+    h.landOnBar();
+    h.update(makePlayer(2));
+    h.finishTransfer();
+    s.toastView.completeSwipe();
+    h.landOnBar();
+    h.update(makePlayer(1, { uniqueId: 3 }));
+    const carrier = makeCarrier(s);
+    carrier.startFlight();
+    assert.equal(s.transferTrack.title, "Track 2");
+    assert.equal(s.toastView.motionPhase, "idle");
+    h.finishTransfer();
+    assert.equal(s.toastView.swipeDirection, -1);
+    s.toastView.beginSwipe();
+    s.toastView.swipe.sample(0.5);
+    assert.ok(s.toastView.activeCard.contentItem.x > 0, "B exits toward the right");
+    assert.ok(s.toastView.nextCard.contentItem.x < 0, "A comes back from the left");
+    s.toastView.completeSwipe();
+    assert.equal(s.toastView.displayedTrack.title, "Track 1");
+    assert.equal(s.toastView.motionPhase, "idle");
+    h.landOnBar();
+    h.update(makePlayer(2, { uniqueId: 4 }));
+    h.startTransfer();
+    h.finishTransfer();
+    assert.equal(s.toastView.swipeDirection, 1, "going forward to B scrolls left again");
+});
+
+for (const mode of ["toast", "popup"]) {
+    test(`${mode} reverses its song and artwork lanes despite a new playback ID`, () => {
+        const h = makeService();
+        const view = makeView(mode);
+        const first = h.service.snapshot(makePlayer(1));
+        const second = h.service.snapshot(makePlayer(2));
+        view.setTrack(first, false);
+        view.setTrack(second, true);
+        assert.equal(view.swipeDirection, 1);
+        view.completeSwipe();
+        view.setTrack(h.service.snapshot(makePlayer(1, { uniqueId: 3 })), true);
+        assert.equal(view.swipeDirection, -1);
+        view.beginSwipe();
+        view.swipe.sample(0.5);
+        if (mode === "toast") {
+            assert.ok(view.activeCard.contentItem.x > 0);
+            assert.ok(view.nextCard.contentItem.x < 0);
+        } else {
+            assert.ok(view.activeCard.coverItem.x > 0);
+            assert.ok(view.nextCard.coverItem.x < 0);
+            assert.ok(view.activeCard.metadataItem.x > 0);
+            assert.ok(view.nextCard.metadataItem.x < 0);
+        }
+        assert.equal(view.displayedTrack.title, "Track 2", "outgoing metadata remains frozen");
+        view.completeSwipe();
+        assert.equal(view.displayedTrack.title, "Track 1");
+        view.setTrack(h.service.snapshot(makePlayer(2, { uniqueId: 4 })), true);
+        assert.equal(view.swipeDirection, 1);
+        view.completeSwipe();
+        assert.equal(view.displayedTrack.title, "Track 2");
+    });
+}
+
+test("returning to the oldest song reverses across several tracks and preserves forward scrolling", () => {
+    const h = makeService();
+    const s = h.service;
+    for (const number of [1, 2, 3]) {
+        h.update(makePlayer(number));
+        h.finishTransfer();
+        if (s.toastView.motionPhase !== "idle")
+            s.toastView.completeSwipe();
+        h.landOnBar();
+    }
+    h.update(makePlayer(1, { uniqueId: 4 }));
+    h.finishTransfer();
+    assert.equal(s.toastView.swipeDirection, -1);
+    s.toastView.beginSwipe();
+    s.toastView.swipe.sample(0.5);
+    assert.ok(s.toastView.activeCard.contentItem.x > 0, "current song exits to the right");
+    assert.ok(s.toastView.nextCard.contentItem.x < 0, "oldest song comes back from the left");
+    s.toastView.completeSwipe();
+    h.landOnBar();
+    for (const number of [2, 3]) {
+        h.update(makePlayer(number, { uniqueId: number + 3 }));
+        h.finishTransfer();
+        assert.equal(s.toastView.swipeDirection, 1, "forward navigation scrolls left again");
+        s.toastView.completeSwipe();
+        h.landOnBar();
+    }
+});
+
+test("returning to a song after its album metadata arrives still scrolls from the left", () => {
+    const h = makeService();
+    const view = makeView("toast");
+    view.setTrack(h.service.snapshot(makePlayer(1, { trackAlbum: "" })), false);
+    view.setTrack(h.service.snapshot(makePlayer(1)), true);
+    assert.equal(view.motionPhase, "idle", "late metadata updates the current song in place");
+    view.setTrack(h.service.snapshot(makePlayer(2)), true);
+    view.completeSwipe();
+    view.setTrack(h.service.snapshot(makePlayer(1, { uniqueId: 3 })), true);
+    assert.equal(view.swipeDirection, -1);
+    view.completeSwipe();
+    assert.equal(view.displayedTrack.title, "Track 1");
+});
+
+test("songs with the same name from another album or player stay distinct in scrolling history", () => {
+    for (const extra of [{ trackAlbum: "Other album" }, { dbusName: "org.mpris.MediaPlayer2.other" }]) {
+        const h = makeService();
+        const view = makeView("toast");
+        view.setTrack(h.service.snapshot(makePlayer(1)), false);
+        view.setTrack(h.service.snapshot(makePlayer(2)), true);
+        view.completeSwipe();
+        view.setTrack(h.service.snapshot(makePlayer(1, { uniqueId: 3, ...extra })), true);
+        assert.equal(view.swipeDirection, 1, "a different song is a new forward entry");
+        view.completeSwipe();
+        view.setTrack(h.service.snapshot(makePlayer(1, { uniqueId: 4 })), true);
+        assert.equal(view.swipeDirection, -1, "the original song still returns from the left");
+        view.completeSwipe();
+    }
+});
+
+test("skips during the flight keep the carried song frozen and scroll to the latest song after landing", () => {
+    const h = makeService();
+    const s = h.service;
+    h.update(makePlayer(1));
+    h.landOnBar();
+    h.update(makePlayer(2));
+    h.startTransfer();
+    const serial = s.transferSerial;
+    const carried = s.transferTrack;
+    h.update(makePlayer(3));
+    h.update(makePlayer(4));
+    assert.equal(s.transferSerial, serial);
+    assert.equal(s.transferTrack.title, "Track 1");
+    assert.equal(s.transferTrack, carried);
+    assert.equal(s.toastView.motionPhase, "idle");
+    h.finishTransfer();
+    assert.equal(s.toastView.displayedTrack.title, "Track 1");
+    assert.equal(s.toastView.targetTrack.title, "Track 4");
+    s.toastView.completeSwipe();
+    assert.equal(s.toastView.displayedTrack.title, "Track 4");
+});
+
+test("returning to the carried song during its flight lands without an unnecessary scroll", () => {
+    const h = makeService();
+    const s = h.service;
+    h.update(makePlayer(1));
+    h.landOnBar();
+    h.update(makePlayer(2));
+    h.startTransfer();
+    h.update(makePlayer(1));
+    assert.equal(s.transferTrack.title, "Track 1");
+    h.finishTransfer();
+    assert.equal(s.toastView.displayedTrack.title, "Track 1");
+    assert.equal(s.toastView.motionPhase, "idle");
+});
+
+test("late incoming artwork is included in the scroll after landing", () => {
+    const h = makeService();
+    const s = h.service;
+    h.update(makePlayer(1));
+    h.landOnBar();
+    h.update(makePlayer(2, { trackArtUrl: "" }));
+    h.startTransfer();
+    const carried = s.transferTrack;
+    h.update(makePlayer(2, { trackArtUrl: "file:///late-art.png" }));
+    assert.equal(s.transferTrack, carried);
+    h.finishTransfer();
+    assert.equal(s.toastView.displayedTrack.title, "Track 1");
+    assert.equal(s.toastView.nextCard.track.artUrl, "file:///late-art.png");
+    s.toastView.completeSwipe();
+    assert.equal(s.toastView.displayedTrack.artUrl, "file:///late-art.png");
+    assert.equal(s.toastView.motionPhase, "idle");
 });
 
 test("popup opening transfers ownership, track changes swipe there, and closing restores the bar", () => {
@@ -325,7 +577,7 @@ test("popup opening transfers ownership, track changes swipe there, and closing 
     assert.equal(s.barView.displayedTrack.title, "Track 2");
 });
 
-test("rapid skips during the outbound flight preserve the old image and show only the latest destination", () => {
+test("rapid skips while preparing the flight coalesce into the latest incoming song", () => {
     const h = makeService();
     const s = h.service;
     h.update(makePlayer());
@@ -336,14 +588,17 @@ test("rapid skips during the outbound flight preserve the old image and show onl
     h.update(makePlayer(4));
     assert.equal(s.transferSerial, serial);
     assert.equal(s.transferTrack.title, "Track 1");
+    h.startTransfer();
+    assert.equal(s.toastView.motionPhase, "idle");
     h.finishTransfer();
     assert.equal(s.toastView.targetTrack.title, "Track 4");
     assert.equal(s.toastView.displayedTrack.title, "Track 1");
     s.toastView.completeSwipe();
     assert.equal(s.toastView.displayedTrack.title, "Track 4");
+    assert.equal(s.toastView.motionPhase, "idle");
 });
 
-test("a skip during the return flight moves the old song back to the toast before the new-song swipe", () => {
+test("a skip during the return flight carries the old song to the toast before scrolling", () => {
     const h = makeService();
     const s = h.service;
     h.update(makePlayer());
@@ -356,10 +611,13 @@ test("a skip during the return flight moves the old song back to the toast befor
     assert.equal(s.owner, "toast");
     assert.equal(s.moving, true);
     assert.equal(s.transferTrack.title, "Track 1");
+    h.startTransfer();
+    assert.equal(s.toastView.motionPhase, "idle");
     h.finishTransfer();
     assert.equal(s.toastView.displayedTrack.title, "Track 1");
     assert.equal(s.toastView.targetTrack.title, "Track 2");
-    assert.equal(s.toastView.motionPhase, "preload");
+    s.toastView.completeSwipe();
+    assert.equal(s.toastView.motionPhase, "idle");
 });
 
 test("late artwork on the same track updates in place without a new toast or swipe", () => {
@@ -635,4 +893,63 @@ test("fullscreen popup opens and closes without flying through the hidden bar", 
     assert.equal(s.moving, true, "ordinary transfers resume when the bar is visible");
     assert.equal(s.transferFrom, "bar");
     assert.equal(s.transferTo, "toast");
+});
+
+test("media bars retain live tracks on every output while only one owns the popup", () => {
+    const h = makeService();
+    const s = h.service;
+    h.update(makePlayer(1));
+    h.finishTransfer();
+    s.dismissToast();
+    h.finishTransfer();
+    const first = { name: "first" };
+    const second = { name: "second" };
+    const firstBar = makeView("bar");
+    const secondBar = makeView("bar");
+    const firstPopup = makeView("popup");
+    const secondPopup = makeView("popup");
+    s.Hyprland.focusedMonitor = first;
+    s.registerViews(first, firstBar, firstPopup);
+    s.registerViews(second, secondBar, secondPopup);
+    assert.equal(s.activeScreen, first);
+    assert.equal(secondBar.displayedTrack.title, "Track 1");
+    s.setPopupOpen(true);
+    h.finishTransfer();
+    h.update(makePlayer(2));
+    assert.equal(secondBar.displayedTrack.title, "Track 2");
+    assert.equal(s.popupView, firstPopup);
+    s.activateScreen(second);
+    assert.equal(s.popupOpen, false);
+    assert.equal(s.popupMapped, false);
+    assert.equal(s.moving, false);
+    assert.equal(s.barView, secondBar);
+    assert.equal(s.popupView, secondPopup);
+    s.setPopupOpen(true);
+    assert.equal(s.activeScreen, second);
+});
+
+test("unplugging the active media output closes its popup and uses a surviving bar", () => {
+    const h = makeService();
+    const s = h.service;
+    h.update(makePlayer(1));
+    h.finishTransfer();
+    s.dismissToast();
+    h.finishTransfer();
+    const first = { name: "first" };
+    const second = { name: "second" };
+    const firstBar = makeView("bar");
+    const secondBar = makeView("bar");
+    s.Hyprland.focusedMonitor = first;
+    s.registerViews(first, firstBar, makeView("popup"));
+    s.registerViews(second, secondBar, makeView("popup"));
+    s.setPopupOpen(true);
+    s.unregisterViews(firstBar);
+    assert.equal(s.popupOpen, false);
+    assert.equal(s.moving, false);
+    assert.equal(s.activeScreen, second);
+    assert.equal(s.barView, secondBar);
+    assert.equal(secondBar.displayedTrack.title, "Track 1");
+    s.unregisterViews(secondBar);
+    assert.equal(s.activeScreen, null);
+    assert.equal(s.barView, null);
 });

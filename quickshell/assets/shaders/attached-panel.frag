@@ -16,6 +16,8 @@ layout(std140, binding = 0) uniform buf {
     float edgeSoftness;
     vec4 borderColor;
     float attachRightEdge;
+    float revealHeight;
+    float contentOpacity;
 };
 layout(binding = 1) uniform sampler2D source;
 
@@ -32,7 +34,7 @@ void main()
 {
     vec2 p = qt_TexCoord0 * panelSize;
     float r = cornerRadius;
-    float bottom = panelSize.y - r;
+    float bottom = revealHeight - r;
 
     // Signed distance to the open left/bottom outline. The two concave
     // shoulders are circular cutouts; their tangents meet the straight edges.
@@ -43,11 +45,13 @@ void main()
         edgeDistance = length(p - vec2(2.0 * r, bottom - r)) - r;
     if (attachRightEdge > 0.5) {
         if (p.x > panelSize.x - r)
-            edgeDistance = r - length(p - vec2(panelSize.x - r, panelSize.y));
+            edgeDistance = r - length(p - vec2(panelSize.x - r, revealHeight));
     } else {
         // A centered popup has a matching bar shoulder and bottom corner.
         edgeDistance = max(edgeDistance, p.x - (panelSize.x - r));
-        if (p.x > panelSize.x - r && p.y < r)
+        // Cover the whole shoulder so the straight-edge feather does not
+        // leave a vertical seam inside the curve at x = panelSize.x - r.
+        if (p.x > panelSize.x * 0.5 && p.y < r)
             edgeDistance = r - length(p - vec2(panelSize.x, r));
         if (p.x > panelSize.x - 2.0 * r && p.y > bottom - r)
             edgeDistance = length(p - vec2(panelSize.x - 2.0 * r, bottom - r)) - r;
@@ -55,7 +59,10 @@ void main()
 
     // The top and right sides join the bar and monitor with square corners.
     // Only the exposed left/bottom outline needs a rounded mask and border.
-    float fillCoverage = coverage(edgeDistance);
+    // The lower screen-edge cutout is open. Bound it to the growing surface
+    // so its continuation cannot expose pixels below the animated body.
+    edgeDistance = max(edgeDistance, p.y - revealHeight);
+    float fillCoverage = revealHeight > 0.0 ? coverage(edgeDistance) : 0.0;
     float borderCoverage = min(fillCoverage,
         max(coverage(edgeDistance) - coverage(edgeDistance + borderWidth), 0.0));
     vec4 content = texture(source, qt_TexCoord0);
@@ -63,5 +70,5 @@ void main()
     // Compose both inside one coverage value. Drawing an antialiased border
     // over an already antialiased mask otherwise darkens the attachment tips.
     fragColor = (content * (fillCoverage - borderColor.a * borderCoverage)
-        + borderColor * borderCoverage) * qt_Opacity;
+        + borderColor * borderCoverage) * (qt_Opacity * contentOpacity);
 }

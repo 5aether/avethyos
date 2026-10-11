@@ -4,8 +4,8 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// Tracks GTK's icon-theme setting and resolves icon names from that theme and
-// its inheritance chain. gsettings monitor is event-driven; there is no poll.
+// Resolves icons from the configured pack and its inheritance chain. An empty
+// config value follows GTK's settings; gsettings monitoring is event-driven.
 QtObject {
     id: root
     readonly property int resolverVersion: 4
@@ -16,12 +16,17 @@ QtObject {
     property string settingsTheme: ""
     property var icons: ({})
     property int revision: 0
+    property bool rebuildPending: false
 
     function resolve(value, fallback) {
         const icon = String(value || "");
         if (!icon.length)
             return "";
-        if (icon.startsWith("/") || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(icon))
+        if (icon.startsWith("/"))
+            return "file://" + icon + "?gtkThemeRevision=" + revision;
+        if (icon.startsWith("file:"))
+            return icon + (icon.indexOf("?") >= 0 ? "&" : "?") + "gtkThemeRevision=" + revision;
+        if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(icon))
             return icon;
         // Desktop files are inconsistent here: some include an image suffix,
         // and some use different casing than the icon theme. The scanner
@@ -68,18 +73,76 @@ QtObject {
     function selectTheme() {
         // nwg-look writes GTK's settings.ini files. Prefer those over the
         // GNOME dconf value, which may still contain Adwaita on wlroots.
-        const selected = gtk3Theme || gtk4Theme || settingsTheme;
+        const selected = Config.iconPack || gtk3Theme || gtk4Theme || settingsTheme || "hicolor";
         if (selected.length && selected !== themeName) {
             themeName = selected;
+            // Do not keep icons from the previous pack while the new one loads.
+            icons = ({});
+            revision += 1;
             rebuild();
         }
     }
 
+    Component.onCompleted: {
+        selectTheme();
+        desktopSync.restart();
+    }
+
+    property Connections configChanges: Connections {
+        target: Config
+        function onIconPackChanged() {
+            root.selectTheme();
+            desktopSync.restart();
+        }
+    }
+
+    // Coalesce edits and serialize them with wallpaper updates in the helper.
+    // Reading Config.file at execution time also handles another edit arriving
+    // while the previous sync is still running.
+    property bool desktopSyncPending: false
+    property Timer desktopSync: Timer {
+        interval: 100
+        onTriggered: {
+            if (desktopTheme.running)
+                root.desktopSyncPending = true;
+            else
+                desktopTheme.running = true;
+        }
+    }
+
+    property Process desktopTheme: Process {
+        command: ["python3", Quickshell.shellPath("scripts/material-palette.py"),
+                  "--icons-only", "--config", Config.file]
+        onExited: function(exitCode) {
+            if (exitCode !== 0)
+                console.error("Avethy: desktop icon theme sync failed (" + exitCode + ")");
+            if (root.desktopSyncPending) {
+                root.desktopSyncPending = false;
+                desktopSync.restart();
+            }
+        }
+    }
+
+    property Connections installedFiles: Connections {
+        target: DesktopFileMonitor
+        function onIconsChanged() { iconRefresh.restart(); }
+    }
+
+    property Timer iconRefresh: Timer {
+        interval: 60
+        onTriggered: root.rebuild()
+    }
+
     function rebuild() {
-        if (!themeName.length || scanner.running)
+        if (!themeName.length)
             return;
+        if (scanner.running) {
+            rebuildPending = true;
+            return;
+        }
+        rebuildPending = false;
         scanner.command = ["python3", Quickshell.shellPath("scripts/icon-theme.py"),
-                           themeName, String(resolverVersion)];
+                           "--", themeName, String(resolverVersion)];
         scanner.targetTheme = themeName;
         scanner.running = true;
     }
@@ -142,7 +205,7 @@ QtObject {
             }
         }
         onExited: {
-            if (scanner.targetTheme !== root.themeName)
+            if (root.rebuildPending || scanner.targetTheme !== root.themeName)
                 Qt.callLater(root.rebuild);
         }
     }

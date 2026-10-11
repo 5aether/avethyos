@@ -95,7 +95,7 @@ hl.layer_rule({
 -- QML owns popup motion; the compositor must not add another fade or slide.
 hl.layer_rule({
     name    = "qs-popups-qml-motion",
-    match   = { namespace = "^quickshell:(osd|nowplaying|mediaplayer|mediaplayer-dismiss|popup-backdrop|launcher|clipboard|polkit|notifications|clock-dismiss|controlcenter-dismiss|tooltip)$" },
+    match   = { namespace = "^quickshell:(osd|nowplaying|mediaplayer|mediaplayer-dismiss|popup-backdrop|launcher|clipboard|polkit|notifications|clock-dismiss|controlcenter|controlcenter-dismiss|tooltip)$" },
     no_anim = true,
 })
 hl.layer_rule({

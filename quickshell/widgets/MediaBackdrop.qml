@@ -86,7 +86,7 @@ Item {
         }
         Rectangle {
             anchors.fill: parent
-            color: Qt.rgba(0.025, 0.02, 0.035, 0.62)
+            color: Qt.rgba(0.025, 0.02, 0.035, 0.72)
         }
     }
 

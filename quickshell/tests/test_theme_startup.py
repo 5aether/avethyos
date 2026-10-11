@@ -126,8 +126,12 @@ class ThemeLauncherTests(unittest.TestCase):
             "AVETHY_TEST_QS_ENV": str(self.path / "qs-env"),
             "AVETHY_TEST_EXPORTS": str(self.path / "exports"),
             "AVETHY_TEST_APPLY_RESULT": "0",
+            "AVETHY_TEST_ICON_PACK": "",
         })
         self.stub("python3", """#!/bin/sh
+case "$1" in
+    */icon-theme.py) printf '%s\\n' "$AVETHY_TEST_ICON_PACK"; exit 0 ;;
+esac
 printf '%s\\n' "$@" > "$AVETHY_TEST_HELPER_ARGS"
 printf 'apply\\n' >> "$AVETHY_TEST_LOG"
 if [ "$AVETHY_TEST_APPLY_RESULT" != 0 ]; then exit "$AVETHY_TEST_APPLY_RESULT"; fi
@@ -178,6 +182,25 @@ printf '%s\\n' "$@" > "$AVETHY_TEST_QS_ARGS"
         self.assertIn("Avethy: could not apply desktop themes; shell startup stopped", result.stderr)
         self.assertEqual(["apply"], (self.path / "events").read_text().splitlines())
         self.assertFalse((self.path / "qs-env").exists())
+
+    def test_icon_pack_reaches_qt_without_evaluating_its_contents(self):
+        marker = self.path / "must-not-be-created"
+        pack = f"Papirus;$(touch {marker})"
+        self.environment["AVETHY_TEST_ICON_PACK"] = pack
+        (self.path / "exports").write_text("")
+        result = self.run_launcher()
+        self.assertEqual(0, result.returncode, result.stderr)
+        actual = dict(line.split("=", 1) for line in (self.path / "qs-env").read_text().splitlines() if "=" in line)
+        self.assertEqual(pack, actual["QS_ICON_THEME"])
+        self.assertFalse(marker.exists())
+
+    def test_empty_icon_pack_follows_the_desktop_theme(self):
+        self.environment["QS_ICON_THEME"] = "OldPack"
+        (self.path / "exports").write_text("")
+        result = self.run_launcher()
+        self.assertEqual(0, result.returncode, result.stderr)
+        actual = (self.path / "qs-env").read_text()
+        self.assertNotIn("QS_ICON_THEME=", actual)
 
 
 if __name__ == "__main__":

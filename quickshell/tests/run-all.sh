@@ -1,9 +1,10 @@
 #!/bin/sh
 # Runs every check that can run without a live Wayland session:
 #   - the JS unit tests for modules/
+#   - Python helpers and optional offscreen Quickshell icon/launcher integration
 #   - the structural QML check
-# Qt tooling (qmllint) and the shell itself are not available here, so this is
-# a floor, not a replacement.
+# qmllint and a live Wayland session are not required, so these checks are
+# a floor, not a replacement for exercising the desktop shell.
 set -e
 
 cd "$(dirname "$0")/.."

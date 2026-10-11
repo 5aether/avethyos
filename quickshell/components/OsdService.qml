@@ -7,9 +7,15 @@ import QtQuick
 QtObject {
     property double volumeSuppressedUntil: 0
     property double brightnessSuppressedUntil: 0
-    property bool controlCenterOpen: false
+    property var openControlCenters: []
+    readonly property bool controlCenterOpen: openControlCenters.length > 0
     // Toasts share the same attached corner and wait for feedback to finish.
     property bool overlayVisible: false
+
+    function setControlCenterOpen(control, opened) {
+        const others = openControlCenters.filter(candidate => candidate !== control);
+        openControlCenters = opened ? others.concat([control]) : others;
+    }
 
     function suppressVolume() {
         volumeSuppressedUntil = Date.now() + 750;

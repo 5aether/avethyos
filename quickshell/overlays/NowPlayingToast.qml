@@ -46,7 +46,7 @@ PanelWindow {
     }
     onShouldShowChanged: syncWindows()
     visible: false
-    screen: NowPlayingService.barView?.QsWindow.window?.screen ?? null
+    screen: NowPlayingService.activeScreen
     aboveWindows: true
     exclusionMode: ExclusionMode.Ignore
     WlrLayershell.layer: WlrLayer.Overlay
@@ -85,11 +85,15 @@ PanelWindow {
         implicitWidth: root.width
         implicitHeight: root.height
 
-        AttachedPanel {
+        AttachedGlass {
+            screen: root.screen
+            sourceWindow: blurBackdrop
+            joinProgress: popupMotion.joinProgress
+            revealProgress: popupMotion.expansionProgress
+            active: popupMotion.active && !NowPlayingService.barHidden
             width: toastCard.width
             height: toastCard.height
             flowProgress: popupMotion.progress
-            flowStrength: 0.075
             color: Theme.barBackground
             cornerRadius: toastCard.cornerRadius
             transform: [
@@ -102,6 +106,15 @@ PanelWindow {
                 }
             ]
         }
+    }
+
+    Item {
+        id: toastTrackClip
+        parent: root.contentItem
+        z: 1
+        width: root.width
+        height: Math.max(0, toastSurface.revealedHeight - toastSurface.revealedRadius)
+        clip: true
     }
 
     Item {
@@ -122,9 +135,12 @@ PanelWindow {
 
         // Mask the artwork background while the shared song view moves freely.
         AttachedPanel {
+            id: toastSurface
             anchors.fill: parent
+            joinProgress: popupMotion.joinProgress
+            revealProgress: popupMotion.expansionProgress
+            contentOpacity: popupMotion.contentOpacity
             flowProgress: popupMotion.progress
-            flowStrength: 0.075
             color: NowPlayingService.barHidden ? Theme.colors.surface0 : "transparent"
             cornerRadius: toastCard.cornerRadius
             MediaBackdrop {
@@ -138,13 +154,16 @@ PanelWindow {
             id: toastTrack
             // The shared-element carrier captures a fixed endpoint while the
             // background scrolls into place. Standalone songs travel with it.
-            parent: root.contentItem
+            parent: toastTrackClip
             mode: "toast"
+            panelMotion: popupMotion
+            panelSurface: toastSurface
+            revealBottom: toastSurface.revealedHeight - toastSurface.revealedRadius
             x: 14 + toastCard.cornerRadius
             y: 12
             width: root.width - x - 17
             height: 58
-            opacity: NowPlayingService.ownsView("toast") ? 1 : 0
+            opacity: NowPlayingService.ownsView("toast") ? popupMotion.contentOpacity : 0
             transform: [
                 Translate {
                     y: root.standalonePresentation ? popupMotion.offsetY : 0

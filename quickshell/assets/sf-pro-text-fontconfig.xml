@@ -4,12 +4,6 @@
     <!-- Keep the system configuration, then prefer SF Pro Text for all
          regular UI text that Qt requests through the sans-serif family. -->
     <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
-    <alias>
-        <family>SF Pro Text</family>
-        <accept>
-            <family>Noto Sans</family>
-        </accept>
-    </alias>
     <alias binding="strong">
         <family>sans-serif</family>
         <prefer>

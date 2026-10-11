@@ -119,7 +119,7 @@ Item {
         visible: tooltipMotion.active
         screen: hostWindow?.screen ?? null
         anchors { top: true; left: true }
-        margins.top: (hostWindow?.height ?? Theme.barHeight) + 6
+        margins.top: Theme.barHeight + 6
         margins.left: Math.max(8, Math.min(triggerPosition.x - width / 2,
             (screen?.width ?? 1920) - width - 8))
         implicitWidth: tooltipText.implicitWidth + 30

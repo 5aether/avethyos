@@ -18,9 +18,12 @@ singleton BluetoothService 1.0 BluetoothService.qml
 singleton NetworkService 1.0 NetworkService.qml
 singleton NightLightService 1.0 NightLightService.qml
 singleton IconThemeService 1.0 IconThemeService.qml
+singleton IconThemeCatalog 1.0 IconThemeCatalog.qml
 singleton NowPlayingService 1.0 NowPlayingService.qml
 singleton ClipboardService 1.0 ClipboardService.qml
 singleton AppUsage 1.0 AppUsage.qml
 singleton AppSearchIndex 1.0 AppSearchIndex.qml
+singleton DesktopFileMonitor 1.0 DesktopFileMonitor.qml
 singleton OsdService 1.0 OsdService.qml
 singleton OverlayService 1.0 OverlayService.qml
+singleton BarGlassService 1.0 BarGlassService.qml

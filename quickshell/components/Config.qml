@@ -7,7 +7,10 @@ import Quickshell.Io
 // User settings file: ~/.config/quickshell/config.ini
 //
 // The shell writes it, and it is a plain INI file, so you can also edit it by
-// hand while quickshell is not running:
+// hand, including while Quickshell is running:
+//
+//   [appearance]
+//   icon-pack = Papirus
 //
 //   [wallpaper]
 //   path = file:///absolute/path/to/wallpaper.mp4
@@ -29,6 +32,9 @@ QtObject {
     id: root
 
     readonly property string file: Quickshell.env("HOME") + "/.config/quickshell/config.ini"
+
+    // Empty follows the desktop's GTK icon theme.
+    property string iconPack: ""
 
     // Wallpaper
     property string wallpaperPath: ""
@@ -91,6 +97,8 @@ QtObject {
     }
 
     function apply(values) {
+        iconPack = String(values["appearance.icon-pack"] || "").trim();
+
         const path = values["wallpaper.path"];
         if (path !== undefined)
             wallpaperPath = path;
@@ -130,7 +138,9 @@ QtObject {
 
     // Serializes the current values back into the format parse() reads.
     function save() {
-        store.setText("[wallpaper]\n"
+        store.setText("[appearance]\n"
+            + "icon-pack = " + iconPack + "\n"
+            + "\n[wallpaper]\n"
             + "path = " + wallpaperPath + "\n"
             + "folder = " + wallpaperFolder + "\n"
             + "fillMode = " + wallpaperFillMode + "\n"

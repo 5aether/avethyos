@@ -10,6 +10,12 @@ Item {
     id: root
 
     property string mode: "bar"
+    // The carrier reads animation bounds without changing the fixed endpoint
+    // geometry used by captures and track layouts.
+    property var panelMotion: null
+    property var panelSurface: null
+    property real revealBottom: root.QsWindow.window?.height ?? root.height
+    property bool followsOwnership: true
     property var displayedTrack: ({ key: "", title: "", artist: "", artUrl: "", album: "", playerName: "" })
     property color titleColor: Theme.colors.text
     property color artistColor: Theme.colors.textDim
@@ -29,12 +35,16 @@ Item {
     property var targetTrack: null
     property string motionPhase: "idle"
     property real slideProgress: 0
+    property var trackHistory: []
+    property int historyIndex: -1
+    property int swipeDirection: 1
+    readonly property int swipeDuration: mode === "toast" ? 420 : 300
     property int activeBuffer: 0
     readonly property TrackCard activeCard: activeBuffer === 0 ? firstCard : secondCard
     readonly property TrackCard nextCard: activeBuffer === 0 ? secondCard : firstCard
     readonly property real swipeDistance: Math.max(1, width) + spacing
     readonly property bool presentationVisible: root.visible && root.opacity > 0.98
-        && NowPlayingService.ownsView(root.mode)
+        && (!followsOwnership || NowPlayingService.ownsView(root.mode))
 
     implicitWidth: mode === "bar"
         ? coverSize + spacing + Math.min(170, Math.ceil(Math.max(titleItem.implicitWidth, artistItem.implicitWidth)))
@@ -52,6 +62,7 @@ Item {
     function snapshot(track) {
         return {
             key: String(track?.key ?? ""),
+            historyKey: String(track?.historyKey ?? ""),
             title: String(track?.title ?? ""),
             artist: String(track?.artist ?? ""),
             artUrl: String(track?.artUrl ?? ""),
@@ -73,6 +84,34 @@ Item {
         return track && (track.key || track.title || track.artist);
     }
 
+    function sameHistoryTrack(left, right) {
+        return sameTrack(left, right)
+            || !!left?.historyKey && left.historyKey === right?.historyKey;
+    }
+
+    function directionForTrack(track) {
+        const index = trackHistory.findIndex(previous => sameHistoryTrack(previous, track));
+        return index >= 0 && index < historyIndex ? -1 : 1;
+    }
+
+    function rememberTrack(track) {
+        if (!hasTrack(track)) {
+            trackHistory = [];
+            historyIndex = -1;
+            return;
+        }
+        const index = trackHistory.findIndex(previous => sameHistoryTrack(previous, track));
+        if (index >= 0) {
+            trackHistory = trackHistory.map((previous, position) =>
+                position === index ? snapshot(track) : previous);
+            historyIndex = index;
+        } else {
+            trackHistory = trackHistory.slice(0, historyIndex + 1)
+                .concat([snapshot(track)]).slice(-64);
+            historyIndex = trackHistory.length - 1;
+        }
+    }
+
     function setTrack(track, animate) {
         targetTrack = snapshot(track);
         if (!animate || !hasTrack(displayedTrack) || !hasTrack(targetTrack)) {
@@ -86,6 +125,7 @@ Item {
         if (sameTrack(displayedTrack, targetTrack)) {
             displayedTrack = targetTrack;
             activeCard.track = targetTrack;
+            rememberTrack(displayedTrack);
             return;
         }
         exitTrack();
@@ -95,11 +135,12 @@ Item {
         if (motionPhase !== "idle" || sameTrack(displayedTrack, targetTrack))
             return;
         motionPhase = "preload";
+        swipeDirection = directionForTrack(targetTrack);
         activeCard.restartScroll();
         nextCard.track = snapshot(targetTrack);
         nextCard.artworkVisible = false;
         activeCard.place(0);
-        nextCard.place(1);
+        nextCard.place(swipeDirection);
         preloadTimeout.restart();
         Qt.callLater(prepareSwipe);
     }
@@ -129,6 +170,7 @@ Item {
             displayedTrack = targetTrack;
             activeCard.track = targetTrack;
         }
+        rememberTrack(displayedTrack);
         activeCard.artworkVisible = activeCard.coverStatus === Image.Ready;
         activeCard.restartScroll();
         Qt.callLater(exitTrack);
@@ -143,6 +185,7 @@ Item {
             displayedTrack = targetTrack;
             activeCard.track = targetTrack;
         }
+        rememberTrack(displayedTrack);
         activeCard.place(0);
         nextCard.place(1);
         activeCard.artworkVisible = activeCard.coverStatus === Image.Ready;
@@ -176,7 +219,8 @@ Item {
         artistGeometry.color = artistItem.color;
         artistGeometry.bold = artistItem.font.bold;
         return { track: snapshot(displayedTrack), cover: coverGeometry,
-                 title: titleGeometry, artist: artistGeometry, screen: screen };
+                 title: titleGeometry, artist: artistGeometry,
+                 bounds: geometry(root), screen: screen };
     }
 
     // Allow a frame for texture upload. A slow cover cannot hold up the swipe.
@@ -299,7 +343,7 @@ Item {
                         clip: true
 
                         readonly property bool scrolling: root.mode === "bar"
-                            && !NowPlayingService.barHidden
+                            && OverlayService.topMargin(root.QsWindow.window?.screen ?? null) > 0
                             && titleText.implicitWidth > width && width > 0
                         readonly property bool scrollActive: scrolling && card.current
                             && root.presentationVisible && !root.animating
@@ -409,44 +453,44 @@ Item {
         XAnimator {
             target: root.activeCard.contentItem
             from: 0
-            to: root.mode === "popup" ? 0 : -root.swipeDistance
-            duration: 300
-            easing.type: Easing.OutCubic
+            to: root.mode === "popup" ? 0 : -root.swipeDirection * root.swipeDistance
+            duration: root.swipeDuration
+            easing.type: root.mode === "toast" ? Easing.InOutCubic : Easing.OutCubic
         }
         XAnimator {
             target: root.nextCard.contentItem
-            from: root.mode === "popup" ? 0 : root.swipeDistance
+            from: root.mode === "popup" ? 0 : root.swipeDirection * root.swipeDistance
             to: 0
-            duration: 300
-            easing.type: Easing.OutCubic
+            duration: root.swipeDuration
+            easing.type: root.mode === "toast" ? Easing.InOutCubic : Easing.OutCubic
         }
         XAnimator {
             target: root.activeCard.coverItem
             from: 0
-            to: root.mode === "popup" ? -(root.coverSize + root.spacing) : 0
-            duration: 300
-            easing.type: Easing.OutCubic
+            to: root.mode === "popup" ? -root.swipeDirection * (root.coverSize + root.spacing) : 0
+            duration: root.swipeDuration
+            easing.type: root.mode === "toast" ? Easing.InOutCubic : Easing.OutCubic
         }
         XAnimator {
             target: root.nextCard.coverItem
-            from: root.mode === "popup" ? root.coverSize + root.spacing : 0
+            from: root.mode === "popup" ? root.swipeDirection * (root.coverSize + root.spacing) : 0
             to: 0
-            duration: 300
-            easing.type: Easing.OutCubic
+            duration: root.swipeDuration
+            easing.type: root.mode === "toast" ? Easing.InOutCubic : Easing.OutCubic
         }
         XAnimator {
             target: root.activeCard.metadataItem
             from: 0
-            to: root.mode === "popup" ? -(root.textWidth + root.spacing) : 0
-            duration: 300
-            easing.type: Easing.OutCubic
+            to: root.mode === "popup" ? -root.swipeDirection * (root.textWidth + root.spacing) : 0
+            duration: root.swipeDuration
+            easing.type: root.mode === "toast" ? Easing.InOutCubic : Easing.OutCubic
         }
         XAnimator {
             target: root.nextCard.metadataItem
-            from: root.mode === "popup" ? root.textWidth + root.spacing : 0
+            from: root.mode === "popup" ? root.swipeDirection * (root.textWidth + root.spacing) : 0
             to: 0
-            duration: 300
-            easing.type: Easing.OutCubic
+            duration: root.swipeDuration
+            easing.type: root.mode === "toast" ? Easing.InOutCubic : Easing.OutCubic
         }
         onFinished: root.finishSwipe()
     }

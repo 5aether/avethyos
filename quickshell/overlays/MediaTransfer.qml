@@ -1,11 +1,13 @@
 import QtQuick
+import Qt5Compat.GraphicalEffects
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Widgets
 import "../components"
+import "../widgets"
 
-// A temporary, input-transparent surface carries the same three elements
-// between windows. The endpoint views retain their layout while hidden.
+// A temporary, input-transparent surface carries the song between windows.
+// Its replacement scrolls in after the carried song reaches the destination.
 PanelWindow {
     id: root
 
@@ -19,6 +21,16 @@ PanelWindow {
     property int prepareAttempts: 0
     property bool awaitingStart: false
     property var layeredDestination: null
+    property int flightDuration: NowPlayingService.transferDuration
+    readonly property var destinationView: NowPlayingService.transferTo !== "bar"
+        ? NowPlayingService.viewFor(NowPlayingService.transferTo) : null
+    readonly property var sourceView: NowPlayingService.transferFrom !== "bar"
+        ? NowPlayingService.viewFor(NowPlayingService.transferFrom) : null
+    readonly property var destinationMotion: destinationView?.panelMotion ?? null
+    // Allow the bar and either live attached body during redirected journeys.
+    // The snapshots remain fixed while only their visible viewport changes.
+    readonly property real carrierBottom: Math.max(Theme.barHeight,
+        panelBottom(sourceView), panelBottom(destinationView))
 
     // The clipping textures keep the same allocation throughout a flight.
     readonly property real coverResolution: Math.max(1, departure?.cover?.width ?? 1,
@@ -66,6 +78,35 @@ PanelWindow {
         if (!view || !view.QsWindow.window || !view.capture)
             return null;
         return view.capture();
+    }
+
+    function panelBottom(view) {
+        const window = view?.QsWindow.window;
+        return window ? (window.margins?.top ?? 0) + Math.max(0, view.revealBottom) : 0;
+    }
+
+    function panelBounds(view) {
+        const window = view?.QsWindow.window;
+        const surface = view?.panelSurface;
+        if (!surface || !window?.screen || !window.contentItem)
+            return Qt.rect(0, 0, 0, 0);
+        const originX = window.anchors?.right && !window.anchors?.left
+            ? window.screen.width - window.width - (window.margins?.right ?? 0)
+            : (window.margins?.left ?? 0);
+        const point = window.contentItem.mapFromItem(surface, 0, 0);
+        return Qt.rect(originX + point.x, (window.margins?.top ?? 0) + point.y,
+            surface.width, surface.height);
+    }
+
+    function remainingDuration() {
+        if (destinationMotion?.expandFromBar && destinationMotion.opened
+                && destinationMotion.progress < 1)
+            return Math.max(1, Math.round(destinationMotion.openDuration
+                * (1 - destinationMotion.progress)));
+        const motion = sourceView?.panelMotion;
+        return motion?.expandFromBar && !motion.opened && motion.progress > 0
+            ? Math.max(1, Math.round(motion.closeDuration * motion.progress))
+            : NowPlayingService.transferDuration;
     }
 
     function mix(a, b) {
@@ -162,8 +203,10 @@ PanelWindow {
         }
         const view = NowPlayingService.viewFor(NowPlayingService.transferTo);
         const window = view?.QsWindow.window;
-        const target = captureView(NowPlayingService.transferTo);
         const source = pendingFrame || captureView(NowPlayingService.transferFrom);
+        if (valid(source) && view && !view.sameTrack(source.track, view.displayedTrack))
+            view.setTrack(source.track, false);
+        const target = captureView(NowPlayingService.transferTo);
         prepareAttempts += 1;
         const laidOut = window?.backingWindowVisible && window.contentItem
             && window.width > 0 && window.height > 0
@@ -195,7 +238,9 @@ PanelWindow {
         screen = target.screen;
         departure = source;
         arrival = target;
-        track = NowPlayingService.transferTrack || source.track || target.track;
+        track = source.track || NowPlayingService.transferTrack || target.track;
+        // A redirected transfer keeps the captured song and its position.
+        NowPlayingService.transferTrack = track;
         progress = 0;
         awaitingStart = true;
         prepared = true;
@@ -207,9 +252,23 @@ PanelWindow {
         if (!awaitingStart || !isCurrent(activeSerial) || !backingWindowVisible
                 || !contentItem || contentItem.width <= 0)
             return;
+        // The destination's connecting curves form while the source keeps
+        // ownership. Closing or redirecting that request cannot strand a wait.
+        if (destinationMotion?.expandFromBar) {
+            if (!destinationMotion.opened) {
+                awaitingStart = false;
+                finish(activeSerial);
+                return;
+            }
+            if (destinationMotion.joinProgress < 1)
+                return;
+        }
         awaitingStart = false;
         // The source retains ownership until the transfer surface exists.
-        NowPlayingService.transferReady = true;
+        NowPlayingService.startTransfer(activeSerial);
+        // A toast starts contracting when ownership leaves it, so read its
+        // remaining time after the handover updates its requested state.
+        flightDuration = remainingDuration();
         flight.start();
     }
 
@@ -217,6 +276,25 @@ PanelWindow {
         id: prepareLayout
         interval: 8
         onTriggered: root.prepareFlight()
+    }
+
+    Timer {
+        interval: 8
+        repeat: true
+        running: root.awaitingStart
+        onTriggered: root.startFlight()
+    }
+
+    Connections {
+        target: root.destinationMotion
+        function onJoinProgressChanged() {
+            if (root.awaitingStart)
+                Qt.callLater(root.startFlight);
+        }
+        function onOpenedChanged() {
+            if (root.awaitingStart)
+                Qt.callLater(root.startFlight);
+        }
     }
 
     Connections {
@@ -244,13 +322,75 @@ PanelWindow {
         property: "progress"
         from: 0
         to: 1
-        duration: NowPlayingService.transferDuration
+        duration: root.flightDuration
         easing.type: Easing.OutCubic
         onFinished: root.finish(root.activeSerial)
     }
 
+    Item {
+        id: carrierViewport
+        width: root.width
+        height: Math.min(root.height, root.carrierBottom)
+        clip: true
+        // Map the transparent native carrier first; paint only when the source
+        // has handed over so waiting never doubles the source's glyphs.
+        visible: NowPlayingService.transferReady
+    }
+
+    // Keep the mask fixed in screen coordinates while the labels move. Its
+    // panel shapes follow the same reveal and curves as the visible surfaces.
+    Item {
+        id: flightTextMask
+        parent: carrierViewport
+        width: root.width
+        height: root.height
+
+        Rectangle {
+            width: parent.width
+            height: Theme.barHeight
+            color: "white"
+        }
+        PanelTextMask { view: root.sourceView }
+        PanelTextMask { view: root.destinationView }
+    }
+
+    ShaderEffectSource {
+        id: flightTextMaskTexture
+        parent: carrierViewport
+        sourceItem: flightTextMask
+        hideSource: true
+        visible: false
+    }
+
+    component PanelTextMask: AttachedPanel {
+        required property var view
+        readonly property var surface: view?.panelSurface ?? null
+        readonly property rect bounds: root.panelBounds(view)
+        x: bounds.x
+        y: bounds.y
+        width: bounds.width
+        height: bounds.height
+        visible: !!view?.QsWindow.window?.backingWindowVisible
+        color: "white"
+        cornerRadius: surface?.cornerRadius ?? 0
+        joinProgress: surface?.joinProgress ?? 0
+        revealProgress: surface?.revealProgress ?? 0
+        attachRightEdge: surface?.attachRightEdge ?? true
+        edgeSoftness: surface?.edgeSoftness ?? 2
+    }
+
+    Item {
+        id: flightText
+        parent: carrierViewport
+        width: root.width
+        height: root.height
+        layer.enabled: true
+        layer.effect: OpacityMask { maskSource: flightTextMaskTexture }
+    }
+
     ClippingRectangle {
         id: flyingCover
+        parent: carrierViewport
         x: root.coordinate("cover", "x")
         y: root.coordinate("cover", "y")
         width: root.coverResolution
@@ -298,6 +438,7 @@ PanelWindow {
     // Movement only transforms their existing glyphs; the gentle crossfade
     // changes wrapping/elision without re-laying out text every animation tick.
     component FlightLabel: Text {
+        parent: flightText
         required property string part
         required property bool destination
         readonly property var frame: destination ? root.arrival : root.departure

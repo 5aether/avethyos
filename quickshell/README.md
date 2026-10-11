@@ -10,7 +10,7 @@ Each directory holds one role, so a file's location tells you what it is.
 
 | Path | Contents |
 | --- | --- |
-| `shell.qml` | Entry point. Instantiates the four windows and nothing else. |
+| `shell.qml` | Entry point. Creates the bar on every output, shared overlays, and IPC routes. |
 | `bar/` | The top bar and everything inside it (launcher, workspaces, clock, media, tray, control center). |
 | `overlays/` | Transient panels drawn above the bar: notification toasts and the polkit prompt. |
 | `background/` | The wallpaper video surface, one instance per output. |
@@ -47,6 +47,9 @@ directory's `qmldir`** in the same step or it will not be found.
 edits apply without a restart:
 
 ```ini
+[appearance]
+icon-pack = Papirus
+
 [wallpaper]
 path = file:///absolute/path/to/wallpaper.mp4
 folder = ~/Videos/Wallpapers
@@ -62,6 +65,38 @@ doNotDisturb = false
 nightLightEnabled = false
 nightLightTemperature = 4000
 ```
+
+`appearance.icon-pack` selects the installed icon theme for the shell and GTK
+and Qt applications. Names are case sensitive. An empty value follows the
+desktop's GTK icon theme. Pack changes apply live, including GTK 2/3/4 settings,
+GNOME's icon setting and KDE's icon loader. Qt uses its `gtk3` platform theme;
+qt6ct is not required. Wallpaper and light/dark changes preserve the exact pack
+you selected. Missing icons use inherited packs and `hicolor`; the shell's
+Material control glyphs keep their own font.
+
+`scripts/run.sh` also applies the pack to Qt's native tray/menu icon provider
+on startup. Restart the shell after changing the pack to refresh those icons.
+Applications that cache icons may also need to be reopened. Existing Flatpak
+app settings are synchronized, but each sandbox must have access to the pack.
+
+To synchronize desktop icons while the shell is stopped:
+
+```sh
+python3 scripts/material-palette.py --icons-only
+```
+
+List installed packs and their exact config names with the shell running:
+
+```sh
+qs ipc call icons list
+qs ipc call icons current
+```
+
+The list includes `~/.icons`, `~/.local/share/icons`, `/usr/local/share/icons`,
+`/usr/share/icons`, custom XDG data paths, and Flatpak/host icon directories.
+Each name is followed by all its installation paths in lookup order. Copy the
+name into `icon-pack`, for example `Papirus` or `Papirus-Dark` if installed.
+To list packs while the shell is stopped, run `python3 scripts/icon-theme.py --list`.
 
 The Control Center's wallpaper library browses `wallpaper.folder` directly,
 including its subfolders, with searchable image and video thumbnails. It accepts
@@ -281,14 +316,27 @@ panel rather than the shell — `scripts/run.sh` prints a warning for each:
 | `bluetoothctl` | Bluetooth pairing agent and device actions; live state and adapter controls use native BlueZ |
 | `ddcutil` | Monitor brightness (needs the user in the `video` group) |
 | `gsettings` | Light/dark theme detection |
+| `gio` | Launching apps not yet known to Quickshell's native desktop-entry index |
 | `hyprctl` | Workspace and session actions |
 | `playerctl` | Event-driven “Now Playing” toast |
 | `wl-copy`, `wl-paste` (`wl-clipboard`) | Event-driven persistent text and media clipboard history |
 | `ffmpeg` | Image previews, video thumbnails, and wallpaper video decoding |
-| `python3` | Wallpaper library/previews, Bluetooth action jobs, monitor names and display color control |
+| `python3` | App and icon discovery, wallpaper library/previews, Bluetooth action jobs, monitor names and display color control |
 
 Audio and media use Quickshell's PipeWire and MPRIS integrations directly and
 need no command-line helpers.
+
+### Application discovery
+
+The launcher watches installed `.desktop` entries and icons with filesystem
+events. New installs, updates, and removals appear while the shell is running,
+including icons installed after the application entry. It monitors user and
+system XDG data directories, `~/.local/share`, `/usr/local/share`, `/usr/share`,
+and Flatpak exports, and starts watching new directories when they are created.
+The installer must provide a `.desktop` entry for the app to appear.
+
+`python3` runs the discovery monitor and icon resolver. `gio` (from GLib) launches
+new entries that Quickshell's native index has not discovered yet.
 
 ## Running
 
@@ -297,6 +345,16 @@ scripts/run.sh
 ```
 
 To start it at login, point your compositor's `exec-once` at that script.
+
+Include `quickshell:controlcenter` in Hyprland's `no_anim` layer rule alongside
+the other shell popups. QML draws the opening and closing transitions; an
+additional compositor fade can obscure the opening reveal.
+
+The control center uses the notification popup's window ordering and clipped
+reveal. Its animation advances with rendered frames, preserving the opening
+and closing motion when window setup or rendering stalls. The opening takes
+260 ms. Cached brightness appears immediately; the hardware refresh follows
+the reveal and targets the detected I²C bus to avoid scanning every monitor.
 
 ## IPC and Hyprland keybindings
 
@@ -310,6 +368,8 @@ qs ipc call clipboard toggle
 qs ipc call controlcenter toggle
 ```
 
+The bar follows connected outputs. IPC toggles open the popup on the output
+under the cursor; clicking a bar button opens it on that bar's output.
 The same command both opens and closes its popup. Example Hyprland bindings:
 
 ```ini
@@ -344,7 +404,12 @@ sends `quickshell-workspace-apps,reset` to clear the held state.
 tests/run-all.sh
 ```
 
-Runs the JavaScript unit tests, a structural check over every QML file
-(brace balance, dropped bindings, whitespace) and a shell syntax check. Qt's
-`qmllint` is not part of this because it is not present in every environment;
+Runs the JavaScript and Python unit tests, a structural check over every QML
+file (brace balance, dropped bindings, whitespace) and helper syntax checks.
+When `qs` is installed, the icon tests also exercise IPC, live pack switching,
+config saving, and newly installed themes in an isolated offscreen shell. With
+`gio` available, launcher integration also checks app installs, launch actions,
+icon installs and replacements, Flatpak exports, and removal without a restart.
+Popup motion checks cover delayed rendering, quick reversals, and closing.
+Qt's `qmllint` is not part of this because it is not present in every environment;
 if you have it, `qmllint -I components bar/*.qml` is worth running too.

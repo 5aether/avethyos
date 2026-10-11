@@ -155,7 +155,7 @@ PanelWindow {
     // Keep the Wayland surface and swapchain fixed while the panel animates.
     // Per-frame resizing reallocates render buffers and waits on the compositor.
     implicitHeight: Math.max(1, (screen ? screen.height : 1080) - margins.top)
-    mask: Region { item: sharedPanel }
+    mask: PopupRegion { surfaceItem: sharedPanel; motion: panelMotion }
 
     function dismissOne(toast, card) {
         if (!toast)
@@ -196,12 +196,15 @@ PanelWindow {
         implicitWidth: root.width
         implicitHeight: root.height
 
-        AttachedPanelBackground {
+        AttachedGlass {
+            screen: root.screen
+            sourceWindow: blurBackdrop
+            joinProgress: panelMotion.joinProgress
+            revealProgress: panelMotion.expansionProgress
+            active: panelMotion.active
             width: sharedPanel.width
             height: sharedPanel.height
-            panelHeight: sharedPanel.height
             flowProgress: panelMotion.progress
-            flowStrength: 0.075
             color: Theme.barBackground
             cornerRadius: sharedPanel.cornerRadius
             transform: [
@@ -219,6 +222,8 @@ PanelWindow {
     Item {
         id: sharedPanel
         readonly property real cornerRadius: 20
+        readonly property real revealedHeight: Math.min(height, 3 * cornerRadius) * panelMotion.joinProgress
+            + Math.max(0, height - 3 * cornerRadius) * panelMotion.expansionProgress
         anchors.top: parent.top
         anchors.right: parent.right
         width: 360 + cornerRadius
@@ -241,8 +246,10 @@ PanelWindow {
         // Clip only the rows; text and icons stay in the main scene graph.
         // The curved background no longer captures and redraws the entire list.
         Item {
-            anchors.fill: parent
-            anchors.bottomMargin: sharedPanel.cornerRadius
+            width: parent.width
+            height: Math.max(0, sharedPanel.revealedHeight
+                - sharedPanel.cornerRadius * panelMotion.joinProgress)
+            opacity: panelMotion.contentOpacity
             clip: true
 
             Column {
@@ -316,6 +323,7 @@ PanelWindow {
                         ]
                         PopupMotion {
                             id: rowMotion
+                            expandFromBar: false
                             opened: toastCard.rowOpened
                             onClosed: if (toastCard.dismissing)
                                 root.finishDismiss(toastCard.toastId, toastCard.removeNotification)

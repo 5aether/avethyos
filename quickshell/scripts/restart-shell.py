@@ -31,7 +31,7 @@ def main() -> None:
         else:
             raise RuntimeError("previous shell did not exit; restart stopped")
     launcher = str(ROOT / "scripts/run.sh")
-    os.execv("/usr/bin/bash", ["bash", launcher, "--no-duplicate", *sys.argv[1:]])
+    os.execv(launcher, [launcher, "--no-duplicate", *sys.argv[1:]])
 
 
 if __name__ == "__main__":

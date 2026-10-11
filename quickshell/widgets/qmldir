@@ -1,10 +1,13 @@
 # Shared visual surfaces used by bar popups and overlay windows.
 AttachedPanel 1.0 AttachedPanel.qml
+AttachedGlass 1.0 AttachedGlass.qml
 AttachedPanelBody 1.0 AttachedPanelBody.qml
 AttachedPanelBackground 1.0 AttachedPanelBackground.qml
 MediaTrackView 1.0 MediaTrackView.qml
 MediaBackdrop 1.0 MediaBackdrop.qml
 PopupMotion 1.0 PopupMotion.qml
+BlurWave 1.0 BlurWave.qml
+PopupRegion 1.0 PopupRegion.qml
 ControlButton 1.0 ControlButton.qml
 ControlSwitch 1.0 ControlSwitch.qml
 ControlSectionHeader 1.0 ControlSectionHeader.qml

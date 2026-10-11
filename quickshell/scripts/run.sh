@@ -28,7 +28,7 @@ warn_missing() {
             echo "warning: $tool not found, the feature using it stays disabled" >&2
     done
 }
-warn_missing nmcli bluetoothctl ddcutil ffmpeg ffprobe gsettings hyprctl playerctl python3 wl-copy wl-paste
+warn_missing nmcli bluetoothctl ddcutil ffmpeg ffprobe gsettings gio hyprctl playerctl python3 wl-copy wl-paste
 
 # Apply before Quickshell captures the environment used by desktop launchers.
 # The helper serializes startup against wallpaper/theme changes and emits only
@@ -39,6 +39,18 @@ if ! theme_exports=$(python3 "$root/scripts/material-palette.py" --startup --she
 fi
 eval "$theme_exports"
 export AVETHY_THEME_READY=1
+
+# Qt's native providers also serve tray/menu icons. Select the same pack before
+# Qt starts; application and notification icons additionally update live in QML.
+if ! icon_pack=$(python3 "$root/scripts/icon-theme.py" --config "$root/config.ini"); then
+    echo "Avethy: could not read the shell icon pack; shell startup stopped" >&2
+    exit 1
+fi
+if [ -n "$icon_pack" ]; then
+    export QS_ICON_THEME="$icon_pack"
+else
+    unset QS_ICON_THEME
+fi
 
 # Keep the Qt multimedia backend on FFmpeg. Without this, a distribution that
 # defaults to GStreamer may pick a backend without hardware decoding, which is

@@ -62,6 +62,8 @@ QtObject {
         source: Qt.resolvedUrl("../assets/icons/MaterialIconsRound-Regular.otf")
     }
     readonly property string iconFamily: iconFont.name
+    // SF Pro Text is installed system-wide from /usr/share/fonts/SF-Fonts
+    // (mounted at /run/host/fonts for the shell runtime).
     readonly property string textFamily: "SF Pro Text"
 
     readonly property QtObject colors: QtObject {

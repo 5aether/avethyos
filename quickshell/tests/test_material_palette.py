@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import importlib.util
 import json
 import math
@@ -422,6 +423,113 @@ class AvethyPaletteTests(unittest.TestCase):
         for section in required:
             if section.startswith("Colors:"):
                 self.assertTrue(color_keys.issubset(sections[section]), section)
+
+
+class DesktopIconThemeTests(unittest.TestCase):
+    def setUp(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        self.root = self.home / "shell"
+        self.root.mkdir()
+        self.config = self.root / "config.ini"
+        self.config.write_text("[appearance]\nicon-pack = Papirus\n")
+        self.roles = palette.material_roles(palette.tonal_palette((20, 80, 140)))
+        for key, value in (("HOME", self.home), ("ROOT", self.root),
+                           ("QT_THEME_DIR", self.home / ".config/avethy"),
+                           ("QT_PLUGIN_DIR", self.home / ".local/lib/avethy/qt-plugins")):
+            stack.enter_context(patch.object(palette, key, value))
+        self.run = stack.enter_context(patch.object(palette.subprocess, "run", return_value=Mock(returncode=0)))
+        self.query = stack.enter_context(patch.object(palette.subprocess, "check_output", return_value="'Desktop-Pack'\n"))
+        stack.enter_context(patch.object(palette.shutil, "which", side_effect=lambda name: "/bin/" + name))
+        stack.enter_context(patch.object(palette.time, "sleep"))
+        stack.enter_context(patch.object(palette, "install_gtk_theme"))
+
+    def test_homebrew_tool_uses_native_gtk_backend_and_other_path_overrides_survive(self):
+        with patch.object(palette.shutil, "which", return_value="/home/linuxbrew/.linuxbrew/bin/gsettings"), \
+                patch.object(Path, "is_file", return_value=True):
+            self.assertEqual("/usr/bin/gsettings", palette.gsettings_command())
+        with patch.object(palette.shutil, "which", return_value="/test-bin/gsettings"):
+            self.assertEqual("gsettings", palette.gsettings_command())
+
+    def test_full_palette_preserves_exact_pack_in_both_modes_and_flatpaks(self):
+        app = self.home / ".var/app/org.example.App/config"
+        app.mkdir(parents=True)
+        for mode in ("dark", "light"):
+            with self.subTest(mode=mode):
+                role = self.roles[mode]
+                palette.install_gtk(role, mode)
+                palette.install_qt(role, mode)
+                palette.install_flatpak_configs(role, mode)
+                palette.set_gsettings(mode, role)
+                palette.sync_flatpak_theme(mode)
+                for directory in (self.home / ".config", app):
+                    for version in ("gtk-3.0", "gtk-4.0"):
+                        settings = palette.parse_ini_text((directory / version / "settings.ini").read_text())
+                        self.assertEqual("Papirus", settings["Settings"]["gtk-icon-theme-name"])
+                    kde = palette.parse_ini_text((directory / "kdeglobals").read_text())
+                    self.assertEqual("Papirus", kde["Icons"]["Theme"])
+                    for toolkit in ("qt5ct", "qt6ct"):
+                        compat = palette.parse_ini_text((directory / toolkit / f"{toolkit}.conf").read_text())
+                        self.assertEqual("Papirus", compat["Appearance"]["icon_theme"])
+                self.assertIn('gtk-icon-theme-name = "Papirus"', (self.home / ".gtkrc-2.0").read_text())
+                commands = [call.args[0] for call in self.run.call_args_list]
+                self.assertIn(["gsettings", "set", "org.gnome.desktop.interface", "icon-theme", "Papirus"], commands)
+                self.assertTrue(any("--env=ICON_THEME=Papirus" in command for command in commands))
+                self.run.reset_mock()
+
+    def test_empty_pack_follows_existing_desktop_instead_of_switching_with_mode(self):
+        self.config.write_text("[appearance]\nicon-pack =\n")
+        gtk = self.home / ".config/gtk-3.0/settings.ini"
+        gtk.parent.mkdir(parents=True)
+        gtk.write_text("[Settings]\ngtk-icon-theme-name = My-Existing-Pack\n")
+        for mode in ("dark", "light"):
+            self.assertEqual("My-Existing-Pack", palette.desktop_icon_theme(mode))
+        gtk.unlink()
+        self.assertEqual("Desktop-Pack", palette.desktop_icon_theme("dark"))
+
+    def test_icons_only_preserves_palette_and_unrelated_toolkit_settings(self):
+        directory = self.home / ".config"
+        gtk = directory / "gtk-3.0"
+        gtk.mkdir(parents=True)
+        (gtk / "settings.ini").write_text("[Settings]\ngtk-theme-name=My-Theme\ngtk-font-name=My Font 11\n"
+                                          "gtk-icon-theme-name=Old-Pack\n[Other]\nkey=value\n")
+        (gtk / "gtk.css").write_text("/* unchanged CSS */")
+        theme = directory / "avethy/palette.json"
+        theme.parent.mkdir()
+        theme.write_text('{"keep": "this palette"}\n')
+        rc = self.home / ".gtkrc-2.0"
+        rc.write_text('gtk-font-name = "My Font 11"\ngtk-icon-theme-name = "Old-Pack"\n')
+        (directory / "kdeglobals").write_text("[General]\nColorScheme=My-Colors\n[Icons]\nTheme=Old-Pack\n")
+        palette.apply_icon_theme("dark")
+        settings = palette.parse_ini_text((gtk / "settings.ini").read_text())
+        self.assertEqual("Papirus", settings["Settings"]["gtk-icon-theme-name"])
+        self.assertEqual("My-Theme", settings["Settings"]["gtk-theme-name"])
+        self.assertEqual("My Font 11", settings["Settings"]["gtk-font-name"])
+        self.assertEqual("value", settings["Other"]["key"])
+        self.assertEqual("/* unchanged CSS */", (gtk / "gtk.css").read_text())
+        self.assertEqual('{"keep": "this palette"}\n', theme.read_text())
+        self.assertIn('gtk-font-name = "My Font 11"', rc.read_text())
+        self.assertIn('gtk-icon-theme-name = "Papirus"', rc.read_text())
+        kde = palette.parse_ini_text((directory / "kdeglobals").read_text())
+        self.assertEqual("My-Colors", kde["General"]["ColorScheme"])
+        self.assertEqual("Papirus", kde["Icons"]["Theme"])
+        self.assertFalse((directory / "qt6ct").exists(), "Icon sync must work without qt6ct")
+        commands = [call.args[0] for call in self.run.call_args_list]
+        self.assertIn(["gsettings", "set", "org.gnome.desktop.interface", "icon-theme", "Papirus"], commands)
+        self.assertFalse(any("reload" in command or "restart" in command for command in commands))
+        notifications = [command for command in commands if command[0] == "dbus-send"]
+        self.assertEqual(1, len(notifications))
+        self.assertIn("int32:4", notifications[0])
+
+    def test_alternate_config_and_pack_names_are_passed_as_literal_arguments(self):
+        alternate = self.root / "alternate.ini"
+        selected = "Custom-Pack;$(touch should-not-exist)%"
+        alternate.write_text("[appearance]\nicon-pack = " + selected + "\n")
+        palette.apply_icon_theme("dark", alternate)
+        self.assertIn(["gsettings", "set", "org.gnome.desktop.interface", "icon-theme", selected],
+                      [call.args[0] for call in self.run.call_args_list])
+        self.assertFalse((self.home / "should-not-exist").exists())
 
 
 if __name__ == "__main__":

@@ -15,6 +15,15 @@ Item {
     property real flowProgress: 1
     property real flowStrength: 0
     property vector2d flowAnchor: Qt.vector2d(1, 0)
+    property real joinProgress: 1
+    property real revealProgress: 1
+    property real contentOpacity: 1
+    // Grow the connecting curves before extending the body. The layout and
+    // texture stay full size so controls never stretch during the reveal.
+    readonly property real revealedHeight: Math.min(height, 3 * cornerRadius) * joinProgress
+        + Math.max(0, height - 3 * cornerRadius) * revealProgress
+    readonly property real revealedRadius: Math.min(cornerRadius * joinProgress,
+        revealedHeight / 3)
     readonly property real bodyLeft: cornerRadius
     readonly property real bodyBottom: height - cornerRadius
 
@@ -27,7 +36,9 @@ Item {
         property real flowProgress: panel.flowProgress
         property real flowStrength: panel.flowStrength
         property vector2d panelSize: Qt.vector2d(panel.width, panel.height)
-        property real cornerRadius: panel.cornerRadius
+        property real cornerRadius: panel.revealedRadius
+        property real revealHeight: panel.revealedHeight
+        property real contentOpacity: panel.contentOpacity
         property real borderWidth: panel.borderWidth
         property real attachRightEdge: panel.attachRightEdge ? 1 : 0
         property real edgeSoftness: panel.edgeSoftness

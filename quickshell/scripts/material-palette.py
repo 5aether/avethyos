@@ -36,7 +36,6 @@ QT_STYLE_NAME = "Avethy"
 QT_QUICK_STYLE_NAME = "Avethy"
 QT_PLUGIN_DIR = HOME / ".local/lib/avethy/qt-plugins"
 QT_THEME_DIR = HOME / ".config/avethy"
-FLATPAK_APPS = ("io.github.kolunmi.Bazaar", "com.github.tchx84.Flatseal")
 FALLBACK_SEED = (103, 80, 164)
 QT_COLOR_ROLES = (
     "WindowText", "Button", "Light", "Midlight", "Dark", "Mid", "Text",
@@ -48,6 +47,45 @@ QT_COLOR_ROLES = (
 
 def gtk_theme_name(mode: str) -> str:
     return "Avethy-dark" if mode == "dark" else "Avethy"
+
+
+def gsettings_command() -> str:
+    # Homebrew's GLib can use a separate settings backend from native GTK.
+    # Preserve ordinary PATH overrides, but use the desktop's tool in that case.
+    command = shutil.which("gsettings")
+    if command and ({".linuxbrew", "Cellar"} & set(Path(command).parts)) and Path("/usr/bin/gsettings").is_file():
+        return "/usr/bin/gsettings"
+    return "gsettings"
+
+
+def desktop_icon_theme(mode: str, config: Path | None = None) -> str:
+    """Use the exact configured pack; an empty value follows GTK's selection."""
+    def value(path: Path, section: str, key: str) -> str:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            parser.read(path, encoding="utf-8")
+            return parser.get(section, key, fallback="").strip()
+        except (configparser.Error, OSError, UnicodeError):
+            return ""
+
+    selected = value(config or ROOT / "config.ini", "appearance", "icon-pack")
+    if selected:
+        return selected
+    for version in ("gtk-3.0", "gtk-4.0"):
+        selected = value(HOME / ".config" / version / "settings.ini", "Settings", "gtk-icon-theme-name")
+        if selected:
+            return selected.strip("\"'")
+    try:
+        selected = subprocess.check_output(
+            [gsettings_command(), "get", "org.gnome.desktop.interface", "icon-theme"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        # GSettings prints a GVariant string, including its quoting/escapes.
+        selected = ast.literal_eval(selected)
+        if isinstance(selected, str) and selected:
+            return selected
+    except (OSError, subprocess.SubprocessError, SyntaxError, ValueError):
+        pass
+    return "Papirus-Dark" if mode == "dark" else "Papirus"
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -694,7 +732,7 @@ def install_gtk(role: dict[str, str], mode: str) -> None:
         atomic_write(directory / "gtk-dark.css", css)
         write_ini(directory / "settings.ini", {"Settings": {
             "gtk-theme-name": gtk_theme_name(mode),
-            "gtk-icon-theme-name": "Papirus-Dark" if mode == "dark" else "Papirus",
+            "gtk-icon-theme-name": desktop_icon_theme(mode),
             "gtk-application-prefer-dark-theme": "1" if mode == "dark" else "0",
         }})
     preserve_once(HOME / ".gtkrc-2.0")
@@ -720,6 +758,7 @@ def gtk2_rc(role: dict[str, str]) -> str:
         "INSENSITIVE": ("surface_container", "on_surface_variant", "surface_container_low", "on_surface_variant"),
     }
     lines = ["# Generated Avethy wallpaper colors.", f'gtk-theme-name = "{gtk_theme_name(mode)}"',
+             f'gtk-icon-theme-name = {json.dumps(desktop_icon_theme(mode), ensure_ascii=False)}',
              'gtk-font-name = "SF Pro Text 10"', f'gtk-color-scheme = "{scheme}"',
              'style "avethy" {']
     for state, values in states.items():
@@ -740,10 +779,10 @@ def gtk2_rc(role: dict[str, str]) -> str:
 
 
 def install_flatpak_configs(role: dict[str, str], mode: str) -> None:
-    """Mirror GTK colors into Flatpak profiles."""
+    """Mirror native configs into existing Flatpak per-app XDG homes."""
     root = HOME / ".var/app"
-    for app_id in FLATPAK_APPS:
-        (root / app_id / "config").mkdir(parents=True, exist_ok=True)
+    if not root.is_dir():
+        return
     for app in root.iterdir():
         config = app / "config"
         if not config.is_dir():
@@ -760,9 +799,24 @@ def install_flatpak_configs(role: dict[str, str], mode: str) -> None:
             atomic_write(directory / "gtk-dark.css", css)
             write_ini(directory / "settings.ini", {"Settings": {
                 "gtk-theme-name": gtk_theme_name(mode),
-                "gtk-icon-theme-name": "Papirus-Dark" if mode == "dark" else "Papirus",
+                "gtk-icon-theme-name": desktop_icon_theme(mode),
                 "gtk-application-prefer-dark-theme": "1" if mode == "dark" else "0",
             }})
+        install_qtct(role, mode, config)
+        atomic_write(config / "qt6ct/gtk3-palette.json", qt_gtk_bridge(role))
+        kde_updates = parse_ini_text(kde_colors(role))
+        kde_updates.setdefault("General", {})["ColorScheme"] = SCHEME_NAME
+        kde_updates["Icons"] = {"Theme": desktop_icon_theme(mode)}
+        kde_updates["UiSettings"] = {"ColorScheme": SCHEME_NAME}
+        kde_updates.setdefault("KDE", {})["widgetStyle"] = QT_STYLE_NAME
+        scheme_path = app / "data/color-schemes" / f"{SCHEME_NAME}.colors"
+        atomic_write(scheme_path, kde_colors(role))
+        atomic_write(config / "avethy/palette.json", qt_native_theme(role, mode, scheme_path))
+        atomic_write(config / "avethy/qtquickcontrols2.conf", qt_quick_config())
+        if QT_PLUGIN_DIR.is_dir():
+            shutil.copytree(QT_PLUGIN_DIR, config / "avethy/qt-plugins", dirs_exist_ok=True)
+        sync_kde_app_schemes(config, role)
+        write_ini(config / "kdeglobals", kde_updates)
 
 
 def kde_colors(role: dict[str, str]) -> str:
@@ -858,7 +912,7 @@ def install_qtct(role: dict[str, str], mode: str, config: Path) -> None:
         atomic_write(path, colors)
         write_ini(config / toolkit / f"{toolkit}.conf", {"Appearance": {
             "color_scheme_path": str(path), "custom_palette": "true", "style": QT_STYLE_NAME,
-            "icon_theme": "Papirus-Dark" if mode == "dark" else "Papirus"}})
+            "icon_theme": desktop_icon_theme(mode)}})
 
 
 def install_qt(role: dict[str, str], mode: str) -> None:
@@ -872,7 +926,7 @@ def install_qt(role: dict[str, str], mode: str) -> None:
     kde_updates["KDE"] = {"LookAndFeelPackage": "org.kde.breezedark.desktop" if mode == "dark" else "org.kde.breeze.desktop",
                           "contrast": "4", "widgetStyle": QT_STYLE_NAME}
     kde_updates["UiSettings"] = {"ColorScheme": SCHEME_NAME}
-    kde_updates["Icons"] = {"Theme": "Papirus-Dark" if mode == "dark" else "Papirus"}
+    kde_updates["Icons"] = {"Theme": desktop_icon_theme(mode)}
     write_ini(HOME / ".config/kdeglobals", kde_updates)
     sync_kde_app_schemes(HOME / ".config", role)
     atomic_write(QT_THEME_DIR / "qtquickcontrols2.conf", qt_quick_config())
@@ -924,12 +978,6 @@ def install_native_qt_plugins() -> None:
     """Install only plugins built from this repository, with no third-party engine."""
     for major in (5, 6):
         build = ROOT / "native/qt-theme" / f"build-qt{major}/plugins"
-        if not build.is_dir():
-            for libdir in ("/usr/lib64", "/usr/lib"):
-                candidate = Path(libdir) / "avethyos/qt-theme" / f"qt{major}/plugins"
-                if candidate.is_dir():
-                    build = candidate
-                    break
         for kind in ("styles", "generic"):
             for source in (build / kind).glob("libavethy-*.so"):
                 target = QT_PLUGIN_DIR / kind / source.name
@@ -1059,6 +1107,7 @@ def nearest_gnome_accent(color: str) -> str:
 def set_gsettings(mode: str, role: dict[str, str]) -> None:
     if not shutil.which("gsettings"):
         return
+    gsettings = gsettings_command()
     legacy_scheme = ";".join((
         f"bg_color:{role['background']}", f"fg_color:{role['on_background']}",
         f"base_color:{role['surface']}", f"text_color:{role['on_surface']}",
@@ -1072,12 +1121,12 @@ def set_gsettings(mode: str, role: dict[str, str]) -> None:
     desired_scheme = "prefer-dark" if mode == "dark" else "prefer-light"
     reload_scheme = "prefer-light" if mode == "dark" else "prefer-dark"
     commands = [
-        ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", reload_scheme],
-        ["gsettings", "set", "org.gnome.desktop.interface", "gtk-theme", reload_theme],
-        ["gsettings", "set", "org.gnome.desktop.interface", "icon-theme", "Papirus-Dark" if mode == "dark" else "Papirus"],
-        ["gsettings", "set", "org.gnome.desktop.interface", "accent-color", nearest_gnome_accent(role["primary"])],
-        ["gsettings", "set", "org.gnome.desktop.interface", "gtk-color-scheme", legacy_scheme],
-        ["gsettings", "set", "org.gnome.desktop.interface", "gtk-color-palette", chooser_palette],
+        [gsettings, "set", "org.gnome.desktop.interface", "color-scheme", reload_scheme],
+        [gsettings, "set", "org.gnome.desktop.interface", "gtk-theme", reload_theme],
+        [gsettings, "set", "org.gnome.desktop.interface", "icon-theme", desktop_icon_theme(mode)],
+        [gsettings, "set", "org.gnome.desktop.interface", "accent-color", nearest_gnome_accent(role["primary"])],
+        [gsettings, "set", "org.gnome.desktop.interface", "gtk-color-scheme", legacy_scheme],
+        [gsettings, "set", "org.gnome.desktop.interface", "gtk-color-palette", chooser_palette],
     ]
     for command in commands:
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -1085,42 +1134,99 @@ def set_gsettings(mode: str, role: dict[str, str]) -> None:
     # Qt's GTK platform theme then rebuild their providers/palettes in-process.
     time.sleep(0.08)
     for key, value in (("color-scheme", desired_scheme), ("gtk-theme", desired_theme)):
-        subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", key, value],
+        subprocess.run([gsettings, "set", "org.gnome.desktop.interface", key, value],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
-def broadcast_kde_theme_change() -> None:
+def broadcast_kde_theme_change(changes: tuple[int, ...] = (0, 2, 4)) -> None:
     """Tell live KColorScheme consumers to reload kdeglobals immediately."""
     if not shutil.which("dbus-send"):
         return
     environment = os.environ.copy()
     environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{os.getuid()}/bus"
-    for change_type in (0, 2, 4):  # PaletteChanged, StyleChanged, IconChanged
+    for change_type in changes:  # PaletteChanged, StyleChanged, IconChanged
         subprocess.run([
             "dbus-send", "--session", "--type=signal", "/KGlobalSettings",
             "org.kde.KGlobalSettings.notifyChange", f"int32:{change_type}", "int32:0",
         ], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
+def apply_icon_theme(mode: str, config: Path | None = None) -> None:
+    """Sync icons independently of wallpaper colors, plugin installs and restarts.
+
+    Qt's gtk3 platform theme reads GtkSettings' gtk-icon-theme-name directly.
+    KDE's own icon loader reads kdeglobals instead; keep both in agreement.
+    """
+    selected = desktop_icon_theme(mode, config)
+    targets = [(HOME / ".config", HOME / ".gtkrc-2.0")]
+    flatpaks = HOME / ".var/app"
+    if flatpaks.is_dir():
+        targets.extend((app / "config", app / "config/gtk-2.0/gtkrc")
+                       for app in flatpaks.iterdir() if (app / "config").is_dir())
+    for directory, gtk2 in targets:
+        for version in ("gtk-3.0", "gtk-4.0"):
+            write_ini(directory / version / "settings.ini", {
+                "Settings": {"gtk-icon-theme-name": selected}})
+        content = gtk2.read_text(encoding="utf-8") if gtk2.is_file() else ""
+        setting = "gtk-icon-theme-name = " + json.dumps(selected, ensure_ascii=False)
+        updated, count = re.subn(r"^\s*gtk-icon-theme-name\s*=.*$", lambda _: setting,
+                                 content, flags=re.MULTILINE)
+        if not count:
+            updated = content.rstrip("\n") + ("\n" if content else "") + setting + "\n"
+        if content != updated:
+            preserve_once(gtk2)
+            atomic_write(gtk2, updated)
+        write_ini(directory / "kdeglobals", {"Icons": {"Theme": selected}})
+        # Keep existing compatibility configs consistent without depending on
+        # qt5ct/qt6ct. The active Qt provider remains the native GTK bridge.
+        for toolkit in ("qt5ct", "qt6ct"):
+            path = directory / toolkit / f"{toolkit}.conf"
+            if path.is_file():
+                write_ini(path, {"Appearance": {"icon_theme": selected}})
+    if shutil.which("gsettings"):
+        subprocess.run([gsettings_command(), "set", "org.gnome.desktop.interface", "icon-theme", selected],
+                       check=True)
+    if os.environ.get("FLATPAK_ID") and shutil.which("flatpak-spawn"):
+        command = ["flatpak-spawn", "--host", "flatpak"]
+    elif shutil.which("flatpak"):
+        command = ["flatpak"]
+    else:
+        command = []
+    if command:
+        subprocess.run([*command, "override", "--user", f"--env=ICON_THEME={selected}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    broadcast_kde_theme_change((4,))
+
+
 def sync_flatpak_theme(mode: str) -> None:
     theme = gtk_theme_name(mode)
-    icons = "Papirus-Dark" if mode == "dark" else "Papirus"
+    icons = desktop_icon_theme(mode)
     if os.environ.get("FLATPAK_ID") and shutil.which("flatpak-spawn"):
         command = ["flatpak-spawn", "--host", "flatpak"]
     elif shutil.which("flatpak"):
         command = ["flatpak"]
     else:
         return
-    subprocess.run([*command, "override", "--user", f"--env=GTK_THEME={theme}", f"--env=ICON_THEME={icons}",
-                    "--filesystem=xdg-data/themes:ro", "--filesystem=xdg-config/gtk-3.0:ro",
-                    "--filesystem=xdg-config/gtk-4.0:ro"],
+    subprocess.run([*command, "override", "--user", f"--env=GTK_THEME={theme}", f"--env=ICON_THEME={icons}"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     root = HOME / ".var/app"
     if root.is_dir():
         for app in root.iterdir():
-            if (app / "config/gtk-4.0/gtk.css").is_file():
-                assignments = [f"--env=GTK_THEME={theme}", f"--env=ICON_THEME={icons}",
-                               f"--env=GTK2_RC_FILES={app / 'config/gtk-2.0/gtkrc'}"]
+            bridge = app / "config/qt6ct/gtk3-palette.json"
+            if bridge.is_file():
+                values = qt_environment(mode)
+                values["QT_GUI_GTK_JSON"] = str(bridge)
+                values["GTK2_RC_FILES"] = str(app / "config/gtk-2.0/gtkrc")
+                desktop = app / "config/avethy"
+                plugins = desktop / "qt-plugins"
+                if plugins.is_dir() and "QT_STYLE_OVERRIDE" in values:
+                    values.update({"QT_PLUGIN_PATH": str(plugins),
+                                   "AVETHY_QT_THEME": str(desktop / "palette.json"),
+                                   "QT_QUICK_CONTROLS_CONF": str(desktop / "qtquickcontrols2.conf"),
+                                   "QT_QUICK_CONTROLS_STYLE_PATH": str(plugins / "qml"),
+                                   "QML_IMPORT_PATH": str(plugins / "qml"),
+                                   "QML2_IMPORT_PATH": str(plugins / "qml")})
+                assignments = [f"--env={key}={value}" for key, value in values.items()]
                 subprocess.run([*command, "override", "--user", *assignments, app.name],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
@@ -1222,7 +1328,7 @@ def current_mode(requested: str | None = None) -> str:
     if requested in ("dark", "light"):
         return requested
     try:
-        value = subprocess.check_output(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+        value = subprocess.check_output([gsettings_command(), "get", "org.gnome.desktop.interface", "color-scheme"],
                                         text=True, stderr=subprocess.DEVNULL)
         return "dark" if "dark" in value else "light"
     except (OSError, subprocess.SubprocessError):
@@ -1302,10 +1408,16 @@ def main() -> int:
     parser.add_argument("--mode", choices=("dark", "light"))
     parser.add_argument("--apply-only", action="store_true", help="reapply the cached palette")
     parser.add_argument("--startup", action="store_true", help="force Avethy at shell startup, generating missing or changed wallpaper colors")
+    parser.add_argument("--icons-only", action="store_true", help="sync the configured icon pack to GTK and Qt without applying wallpaper colors")
+    parser.add_argument("--config", type=Path, help="config.ini to read with --icons-only")
     parser.add_argument("--shell-environment", action="store_true", help="print safely quoted theme exports for the launcher")
     parser.add_argument("--preview-dir", type=Path,
                         help="write light/dark theme files here without applying them")
     args = parser.parse_args()
+    if args.icons_only and (args.startup or args.apply_only or args.preview_dir or args.source is not None or args.shell_environment):
+        parser.error("--icons-only cannot be combined with palette options")
+    if args.config and not args.icons_only:
+        parser.error("--config requires --icons-only")
     if args.preview_dir and (args.apply_only or args.startup or args.shell_environment):
         parser.error("--preview-dir cannot be combined with apply/startup/environment options")
     if args.startup and args.apply_only:
@@ -1319,7 +1431,9 @@ def main() -> int:
         CACHE.mkdir(parents=True, exist_ok=True)
         with (CACHE / "theme.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            if args.startup:
+            if args.icons_only:
+                apply_icon_theme(mode, args.config)
+            elif args.startup:
                 startup(mode)
             elif args.apply_only:
                 apply(read_roles(), mode)

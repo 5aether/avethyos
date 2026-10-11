@@ -126,11 +126,15 @@ PanelWindow {
         implicitWidth: root.width
         implicitHeight: root.height
 
-        AttachedPanel {
+        AttachedGlass {
+            screen: root.screen
+            sourceWindow: blurBackdrop
+            joinProgress: popupMotion.joinProgress
+            revealProgress: popupMotion.expansionProgress
+            active: popupMotion.active
             width: card.width
             height: card.height
             flowProgress: popupMotion.progress
-            flowStrength: 0.075
             color: Theme.barBackground
             cornerRadius: card.cornerRadius
             transform: [
@@ -147,9 +151,11 @@ PanelWindow {
 
     AttachedPanel {
         id: card
+        joinProgress: popupMotion.joinProgress
+        revealProgress: popupMotion.expansionProgress
+        contentOpacity: popupMotion.contentOpacity
         color: "transparent"
         flowProgress: popupMotion.progress
-        flowStrength: 0.075
         anchors.right: parent.right
         anchors.top: parent.top
         width: 280 + cornerRadius

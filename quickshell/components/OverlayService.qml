@@ -1,10 +1,16 @@
 pragma Singleton
 
 import QtQuick
+import Quickshell
 import Quickshell.Hyprland
+import "../modules/screens.js" as Screens
 
 // All attached overlays follow the bar's visibility on their own output.
 QtObject {
+    function screenAt(point) {
+        return Screens.screenAt(point, Quickshell.screens, Hyprland.monitors.values);
+    }
+
     function topMargin(screen) {
         const monitor = screen ? Hyprland.monitorFor(screen) : null;
         const workspace = monitor?.activeWorkspace;

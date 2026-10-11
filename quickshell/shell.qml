@@ -1,7 +1,7 @@
 //@ pragma UseQApplication
 
-// Entry point. Wires the four windows of the shell together; every piece of
-// shared state lives in the singletons under components/.
+// Entry point. Wires the per-output bars and shared overlays together. Shared
+// state lives in the singletons under components/.
 //
 // Layout of this configuration:
 //   bar/         the top bar and everything that lives in it
@@ -15,22 +15,108 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import "components"
 import "bar"
 import "overlays"
 import "background"
 
 ShellRoot {
-    // Keep the public endpoint directly under ShellRoot so it is registered
-    // as part of initial configuration construction.
+    id: root
+
+    // Public endpoints are shared by every bar. Resolve the pointer output
+    // for each request instead of registering a competing handler per bar.
+    property var popupRequests: []
+    readonly property var iconCatalog: IconThemeCatalog
+
+    function requestPopup(name, argument) {
+        popupRequests = popupRequests.concat([{ name: name, argument: argument || "" }]);
+        // Rotation lives in IPC metadata rather than a monitor property.
+        Hyprland.refreshMonitors();
+        if (!cursorPosition.running)
+            cursorPosition.running = true;
+    }
+
+    function dispatchPopup(point) {
+        const request = popupRequests[0];
+        popupRequests = popupRequests.slice(1);
+        if (!request)
+            return;
+        const screen = OverlayService.screenAt(point)
+            || Quickshell.screens.find(s => s.name === Hyprland.focusedMonitor?.name)
+            || Quickshell.screens[0];
+        const bar = bars.instances.find(instance => instance.screen === screen);
+        if (bar) {
+            if (request.name === "applauncher") bar.toggleLauncher();
+            else if (request.name === "clock") bar.toggleClock();
+            else if (request.name === "mediaplayer") bar.toggleMediaPlayer();
+            else if (request.name === "clipboard") bar.toggleClipboard();
+            else if (request.name === "controlcenter") bar.toggleControlCenter();
+            else if (request.name === "controlcenter-menu") bar.openControlMenu(request.argument);
+        }
+    }
+
+    Process {
+        id: cursorPosition
+        command: ["hyprctl", "-j", "cursorpos"]
+        stdout: StdioCollector { id: cursorOutput }
+        onExited: function(exitCode) {
+            let point = null;
+            if (exitCode === 0) {
+                try { point = JSON.parse(cursorOutput.text); }
+                catch (error) { console.warn("Could not read cursor output:", error); }
+            }
+            root.dispatchPopup(point);
+            if (root.popupRequests.length)
+                Qt.callLater(() => { cursorPosition.running = true; });
+        }
+    }
+
     IpcHandler {
         target: "applauncher"
-        function toggle(): void { bar.toggleLauncher(); }
+        function toggle(): void { root.requestPopup("applauncher"); }
+    }
+    IpcHandler {
+        target: "clock"
+        function toggle(): void { root.requestPopup("clock"); }
+    }
+    IpcHandler {
+        target: "mediaplayer"
+        function toggle(): void { root.requestPopup("mediaplayer"); }
+    }
+    IpcHandler {
+        target: "clipboard"
+        function toggle(): void { root.requestPopup("clipboard"); }
+    }
+    IpcHandler {
+        target: "controlcenter"
+        function toggle(): void { root.requestPopup("controlcenter"); }
+        function close(): void {
+            root.popupRequests = root.popupRequests.filter(request => !request.name.startsWith("controlcenter"));
+            for (const bar of bars.instances)
+                bar.closeControlCenter();
+        }
+        function menu(name: string): void {
+            if (["network", "bluetooth", "wallpaper", "nightLight"].indexOf(name) >= 0)
+                root.requestPopup("controlcenter-menu", name);
+        }
+    }
+    IpcHandler {
+        target: "icons"
+        function list(): string { return root.iconCatalog.list(); }
+        function current(): string { return IconThemeService.themeName; }
     }
 
     // Created first so the wallpaper is on screen before the bar draws over it.
     WallpaperSurface {}
-    Bar { id: bar }
+    Variants {
+        id: bars
+        model: Quickshell.screens
+        Bar {
+            required property var modelData
+            screen: modelData
+        }
+    }
     PolkitDialog {}
     NotificationToast { id: fullscreenNotification }
     NowPlayingToast { id: fullscreenNowPlaying }

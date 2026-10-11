@@ -3,6 +3,7 @@ pragma Singleton
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 
 // A single owner for the song's visible artwork and labels. The bar, toast and
 // popup retain their geometry while immutable snapshots travel between them.
@@ -10,12 +11,14 @@ QtObject {
     id: root
 
     readonly property int transferDuration: 340
-    readonly property int toastDuration: 2000
+    readonly property int toastDuration: 5000
     readonly property var emptyTrack: ({ key: "", title: "", artist: "", artUrl: "", album: "", playerName: "" })
     property var latestTrack: emptyTrack
     property var barView: null
     property var toastView: null
     property var popupView: null
+    property var mediaEndpoints: []
+    property var activeScreen: null
     property string owner: "bar"
     property bool moving: false
     property bool transferReady: false
@@ -26,8 +29,7 @@ QtObject {
     property bool toastMapped: false
     property bool toastClosing: false
     property bool toastStandalone: false
-    // Bound by the bar to fullscreen state on its own output.
-    property bool barHidden: false
+    readonly property bool barHidden: activeScreen ? OverlayService.topMargin(activeScreen) === 0 : false
     property bool popupMapped: false
     property bool popupOpen: false
     readonly property bool mediaPopupVisible: popupOpen
@@ -43,6 +45,53 @@ QtObject {
     property string pendingArtwork: ""
 
     signal transferRequested(int serial)
+
+    function registerViews(screen, bar, popup) {
+        if (!screen)
+            return;
+        mediaEndpoints = mediaEndpoints.filter(endpoint => endpoint.bar !== bar)
+            .concat([{ screen: screen, bar: bar, popup: popup }]);
+        bar.setTrack(latestTrack, false);
+        if (!barView || screen.name === Hyprland.focusedMonitor?.name
+                && !popupMapped && !toastMapped && !moving)
+            activateScreen(screen);
+    }
+
+    function unregisterViews(bar) {
+        mediaEndpoints = mediaEndpoints.filter(endpoint => endpoint.bar !== bar);
+        if (barView !== bar)
+            return;
+        setPopupOpen(false);
+        if (moving)
+            finishTransfer(transferSerial);
+        barView = null;
+        popupView = null;
+        activeScreen = null;
+        if (mediaEndpoints.length)
+            activateScreen(mediaEndpoints[0].screen);
+    }
+
+    function activateScreen(screen) {
+        const endpoint = mediaEndpoints.find(candidate => candidate.screen === screen);
+        if (!endpoint || barView === endpoint.bar)
+            return;
+        // Finish the old output's handoff before replacing its endpoints.
+        setPopupOpen(false);
+        if (moving)
+            finishTransfer(transferSerial);
+        activeScreen = screen;
+        barView = endpoint.bar;
+        popupView = endpoint.popup;
+        if (owner === "bar")
+            barView.setTrack(latestTrack, false);
+    }
+
+    function syncBars() {
+        for (const endpoint of mediaEndpoints) {
+            if (endpoint.bar !== barView)
+                endpoint.bar.setTrack(latestTrack, false);
+        }
+    }
 
     function artworkUrl(source) {
         if (!/^file:.*\.webp(?:[?#].*)?$/i.test(source))
@@ -91,12 +140,16 @@ QtObject {
             return emptyTrack;
         const title = String(player.trackTitle || "Unknown track");
         const artist = String(player.trackArtist || "");
+        const album = String(player.trackAlbum || "");
         const source = String(player.dbusName || MediaService.playerName(player));
         // Artwork can arrive later than the metadata; it is not a new song.
         const trackId = String(player.uniqueId || "");
+        // uniqueId advances on every track change, including a return to a
+        // previous song. History needs an identity independent of that counter.
         return { key: source + "\n" + (trackId || title + "\n" + artist),
+            historyKey: JSON.stringify([source, title, artist, album]),
             title: title, artist: artist, artUrl: artworkUrl(String(player.trackArtUrl || "")),
-            album: String(player.trackAlbum || ""), playerName: MediaService.playerName(player) };
+            album: album, playerName: MediaService.playerName(player) };
     }
 
     function refresh() {
@@ -106,6 +159,7 @@ QtObject {
         const started = playing && !wasPlaying;
         wasPlaying = playing;
         latestTrack = next;
+        syncBars();
         if (!next.key.length) {
             reset();
             return;
@@ -183,6 +237,12 @@ QtObject {
         transferRequested(transferSerial);
     }
 
+    function startTransfer(serial) {
+        if (serial !== transferSerial || !moving)
+            return;
+        transferReady = true;
+    }
+
     function finishTransfer(serial) {
         if (serial !== transferSerial || !moving)
             return;
@@ -217,6 +277,11 @@ QtObject {
     function showToast() {
         if (!latestTrack.key || popupOpen)
             return;
+        if (!toastMapped && !moving && mediaEndpoints.length) {
+            const focused = mediaEndpoints.find(endpoint => endpoint.screen.name === Hyprland.focusedMonitor?.name);
+            if (focused)
+                activateScreen(focused.screen);
+        }
         if (OsdService.overlayVisible) {
             pendingToast = true;
             return;

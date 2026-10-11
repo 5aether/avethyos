@@ -1,6 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
+# Remove unwanted desktop apps and their Nautilus extensions after all installs.
+unwanted_apps=()
+for package in gnome-control-center gnome-terminal gnome-terminal-nautilus \
+    file-roller file-roller-nautilus; do
+    if rpm -q "$package" >/dev/null 2>&1; then
+        unwanted_apps+=("$package")
+    fi
+done
+if (( ${#unwanted_apps[@]} > 0 )); then
+    dnf5 remove -y --no-autoremove "${unwanted_apps[@]}"
+fi
+
 dnf5 copr remove -y lionheartp/Hyprland
 dnf5 copr remove -y lilay/topgrade
 dnf5 config-manager unsetopt fedora-cisco-openh264.enabled

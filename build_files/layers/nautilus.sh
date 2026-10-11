@@ -4,14 +4,13 @@ set -euo pipefail
 # Fedora's gvfs-goa package includes the OneDrive backend.
 dnf5 install -y --setopt=install_weak_deps=False \
     nautilus nautilus-extensions nautilus-python \
-    file-roller file-roller-nautilus 7zip zip unzip unar \
+    7zip zip unzip unar \
     sushi \
     localsearch tinysparql \
     gnome-keyring libsecret \
     gnome-online-accounts \
     gnome-disk-utility \
     gparted \
-    gnome-terminal-nautilus \
     xdg-user-dirs xdg-user-dirs-gtk \
     ffmpegthumbnailer papers-thumbnailer gnome-epub-thumbnailer \
     gdk-pixbuf2-modules-extra glycin-loaders \

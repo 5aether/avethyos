@@ -37,7 +37,8 @@ fi
 # Generate one generic bootc initramfs after all layers, including NVIDIA.
 install -d -m 0700 /var/roothome
 depmod -a "$kernel_version"
-DRACUT_NO_XATTR=1 dracut --force --no-hostonly \
+# Keep unchanged initramfs contents identical across daily rebuilds.
+DRACUT_NO_XATTR=1 dracut --force --no-hostonly --reproducible \
     --add-confdir /ctx/kernel/dracut.conf.d \
     "/usr/lib/modules/${kernel_version}/initramfs.img" "$kernel_version"
 test -s "/usr/lib/modules/${kernel_version}/vmlinuz"

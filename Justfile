@@ -140,13 +140,12 @@ build $target_image=image_name $tag=default_tag $variant="standard":
 
 build-nvidia $target_image=image_name $tag=nvidia_tag: (build target_image tag "nvidia")
 
-# Split the image for smaller updates (New)!
+# Group image contents into reusable layers for smaller bootc upgrades.
 rechunk $target_image=image_name $tag=default_tag:
     #!/usr/bin/env bash
 
     set -xeuo pipefail
 
-    # TODO: pin chunkah image to hash once mature enough
     # You may run into space issues on github runners as we are making a
     # complete copy of the image, which likely has no shared layers, unless your
     # base image is also using chunkah
@@ -159,11 +158,16 @@ rechunk $target_image=image_name $tag=default_tag:
     trap 'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf "${CHUNKAH_OUTPUT_DIR}"' EXIT
     podman inspect "${target_image}:${tag}" > "${CHUNKAH_CONFIG_FILE}"
 
+    # Keep the packer and timestamp fixed across releases for layer reuse.
     podman run --rm \
-      --mount=type=image,src="${target_image}:${tag}",target=/chunkah \
+      --mount=type=image,src="${target_image}:${tag}",target=/chunkah,rw=true \
+      -v "${PWD}/build_files/rechunk.sh:/rechunk.sh:ro,Z" \
       -v "${CHUNKAH_CONFIG_FILE}:/chunkah-config.json:ro,Z" \
       -v "${CHUNKAH_OUTPUT_DIR}:/run/out:Z" \
-      quay.io/coreos/chunkah:latest \
+      --env SOURCE_DATE_EPOCH=0 \
+      --entrypoint=/bin/bash \
+      quay.io/coreos/chunkah:v0.6.0@sha256:ff8b8b466a942ec6000445d4001fc661e2fc5a952ad9ee29b4de9ab09d1d1708 \
+      /rechunk.sh \
       build \
       --verbose \
       --compressed \
@@ -173,7 +177,9 @@ rechunk $target_image=image_name $tag=default_tag:
       --config /chunkah-config.json \
       --output oci:/run/out/chunked
 
-    CHUNKED_IMAGE="$(podman pull "oci:${CHUNKAH_OUTPUT_DIR}/chunked")"
+    CHUNKED_IMAGE="$(podman pull --quiet "oci:${CHUNKAH_OUTPUT_DIR}/chunked")"
+    # Check the final layout before replacing the original image tag.
+    podman run --rm --pull=never --entrypoint=bootc "${CHUNKED_IMAGE}" container lint
     podman tag "${CHUNKED_IMAGE}" "${target_image}:${tag}"
 
 # Split the image for smaller updates (Classical)!

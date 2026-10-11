@@ -12,7 +12,7 @@ dnf5 install -y --setopt=install_weak_deps=False \
     gnome-disk-utility \
     xdg-user-dirs xdg-user-dirs-gtk \
     ffmpegthumbnailer papers-thumbnailer gnome-epub-thumbnailer \
-    totem-thumbnailer gnome-video-thumbnails evince-thumbnailer \
+    evince-thumbnailer \
     gdk-pixbuf2-modules-extra glycin-loaders \
     webp-pixbuf-loader heif-pixbuf-loader avif-pixbuf-loader jxl-pixbuf-loader \
     gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugin-libav \

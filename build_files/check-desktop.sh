@@ -46,6 +46,14 @@ def inspect_tree(root):
 
 
 def check_installation():
+    # Both disk management apps must be installed in each published image.
+    run(["rpm", "-q", "gnome-disk-utility", "gparted"])
+    tool = Path("/usr/bin/avethyos")
+    require(tool.is_file() and os.access(tool, os.X_OK), "Missing executable avethyos settings command")
+    require(tool.stat().st_uid == 0 and not tool.stat().st_mode & 0o022,
+            "AvethyOS settings command is user-writable")
+    run([str(tool), "--help"])
+    run(["bootc", "loader-entries", "set-options-for-source", "--help"])
     for root in (SHELL, HYPR):
         inspect_tree(root)
     for path in (SHELL / "shell.qml", SHELL / "config.ini", SHELL / "components/Config.qml",

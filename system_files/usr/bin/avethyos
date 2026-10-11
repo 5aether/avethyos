@@ -1,0 +1,152 @@
+#!/usr/bin/python3
+"""Persistent machine kernel preferences through bootc's native source API."""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+STATE = Path('/etc/avethyos/kernel-arguments.json')
+BOOTC = '/usr/bin/bootc'
+SOURCE = 'avethyos-user'
+KEY = re.compile(r'[A-Za-z0-9_.-]+\Z')
+
+
+def validate(arguments):
+    for argument in arguments:
+        if (not KEY.fullmatch(argument.partition('=')[0])
+                or any(c.isspace() or ord(c) < 32 or c in '\"\'\\' for c in argument)):
+            raise ValueError(f'Invalid kernel argument: {argument!r}. Pass each argument separately; '
+                             'values containing whitespace, quotes or backslashes are unsupported.')
+    return arguments
+
+
+def load(path=STATE):
+    if not path.exists():
+        return {'version': 1, 'arguments': [], 'pending': False}
+    state = json.loads(path.read_text())
+    if (not isinstance(state, dict) or state.get('version') != 1 or not isinstance(state.get('arguments'), list)
+            or not all(isinstance(arg, str) for arg in state['arguments'])
+            or not isinstance(state.get('pending'), bool)):
+        raise ValueError(f'Invalid preference file: {path}')
+    validate(state['arguments'])
+    return state
+
+
+def save(state, path):
+    # Rename and fsync keep a failed/interrupted apply recoverable with kernel apply.
+    fd, temporary = tempfile.mkstemp(prefix='.kernel-arguments-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            os.fchmod(stream.fileno(), 0o644)
+            json.dump(state, stream, indent=2)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def change(current, operation, arguments):
+    validate(arguments)
+    if operation == 'reset':
+        return []
+    if operation == 'apply':
+        return current[:]
+    if operation == 'set':
+        names = {arg.partition('=')[0] for arg in arguments}
+        current = [arg for arg in current if arg.partition('=')[0] not in names]
+    elif operation == 'remove':
+        return [arg for arg in current if not any(
+            arg == target if '=' in target else arg.partition('=')[0] == target
+            for target in arguments)]
+    return list(dict.fromkeys([*current, *arguments]))
+
+
+def stage(operation, arguments, path=STATE, runner=subprocess.run):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    # A permanent, separate lock remains valid across atomic preference renames.
+    with (path.parent / 'kernel-arguments.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load(path)
+        desired = change(state['arguments'], operation, arguments)
+        probe = runner([BOOTC, 'loader-entries', 'set-options-for-source', '--help'],
+                       capture_output=True, text=True)
+        if probe.returncode:
+            raise RuntimeError('This installation lacks the native bootc kernel-argument API. '
+                               'Upgrade AvethyOS first.\n' + probe.stderr)
+        state.update(arguments=desired, pending=True)
+        save(state, path)
+        command = [BOOTC, 'loader-entries', 'set-options-for-source', '--source', SOURCE]
+        if desired:
+            command += ['--options', ' '.join(desired)]
+        result = runner(command, capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError('Preferences saved, but bootc could not stage them. '
+                               'Fix the reported error, then run sudo avethyos kernel apply.\n'
+                               + result.stdout + result.stderr)
+        state['pending'] = False
+        save(state, path)
+
+
+def parser():
+    root = argparse.ArgumentParser(description=__doc__)
+    commands = root.add_subparsers(dest='command', required=True)
+    fnmode = commands.add_parser('fnmode', help='Apple keyboard Fn mode (reboot required)')
+    fnmode.add_argument('mode', choices=('0', '1', '2', '3', '4', 'default'),
+                        help='0 disabled; 1 media first; 2 F keys first; 3 auto; '
+                             '4 F keys disabled; default removes your override')
+    kernel = commands.add_parser('kernel', help='Manage your persistent kernel arguments')
+    operations = kernel.add_subparsers(dest='operation', required=True)
+    operations.add_parser('show', help='Show saved preferences and the running kernel command line')
+    for name, description in (('set', 'Replace your values for these argument names'),
+                              ('add', 'Append arguments, allowing repeated names'),
+                              ('remove', 'Remove your arguments by name or exact name=value')):
+        operation = operations.add_parser(name, help=description)
+        operation.add_argument('arguments', nargs='+')
+    operations.add_parser('reset', help='Remove all your managed arguments')
+    operations.add_parser('apply', help='Retry applying saved preferences')
+    return root
+
+
+def main(argv=None):
+    options = parser().parse_args(argv)
+    try:
+        if options.command == 'kernel' and options.operation == 'show':
+            state = load()
+            print('Your saved arguments: ' + (' '.join(state['arguments']) or '(none)'))
+            print('Apply status: ' + ('pending; run sudo avethyos kernel apply' if state['pending']
+                                      else 'no pending apply; reboot after changes'))
+            print('Running kernel: ' + Path('/proc/cmdline').read_text().strip())
+            return 0
+        if os.geteuid() != 0:
+            raise RuntimeError('Use sudo avethyos ' + ' '.join(sys.argv[1:]))
+        if options.command == 'fnmode':
+            operation = 'remove' if options.mode == 'default' else 'set'
+            arguments = ['hid_apple.fnmode' if options.mode == 'default'
+                         else 'hid_apple.fnmode=' + options.mode]
+        else:
+            operation, arguments = options.operation, getattr(options, 'arguments', [])
+        stage(operation, arguments)
+        print('Kernel preferences staged. Reboot to use them. Continue updating with sudo bootc upgrade.')
+        return 0
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f'avethyos: {error}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

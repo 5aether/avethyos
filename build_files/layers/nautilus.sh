@@ -9,8 +9,7 @@ dnf5 install -y --setopt=install_weak_deps=False \
     localsearch tinysparql \
     gnome-keyring libsecret \
     gnome-online-accounts \
-    gnome-disk-utility \
-    gparted \
+    gnome-disk-utility gparted \
     xdg-user-dirs xdg-user-dirs-gtk \
     ffmpegthumbnailer papers-thumbnailer gnome-epub-thumbnailer \
     gdk-pixbuf2-modules-extra glycin-loaders \

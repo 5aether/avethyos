@@ -67,6 +67,66 @@ compressed image size and the estimated download from the previous image of the
 same variant. This estimate counts new layer digests; it does not include metadata
 or reflect clients upgrading from older releases.
 
+## Kernel preferences
+
+Set Apple keyboard function keys to F1–F12 first:
+
+```bash
+sudo avethyos fnmode 2
+```
+
+Reboot to apply the setting. This sets `hid_apple.fnmode=2`; it applies to keyboards
+using the Linux `hid_apple` driver. Modes are `0` (disabled), `1` (media keys first),
+`2` (F keys first), `3` (automatic), and `4` (F keys disabled). Use
+`sudo avethyos fnmode default` to remove your override.
+
+Other kernel arguments use the same interface:
+
+```bash
+avethyos kernel show
+sudo avethyos kernel set hid_apple.fnmode=2
+sudo avethyos kernel add console=tty0 console=ttyS0
+sudo avethyos kernel remove console=ttyS0
+sudo avethyos kernel remove console
+sudo avethyos kernel reset
+```
+
+`set` replaces your values for the supplied names, leaving other preferences
+alone. `add` permits repeated names; `remove` accepts an argument name or an exact
+`name=value`. `reset` removes all arguments managed by this command. Each argument
+is a separate command-line token. Values containing whitespace, quotes or
+backslashes are rejected to avoid changing their meaning during serialization.
+
+Preferences live in `/etc/avethyos/kernel-arguments.json`, which survives image
+updates. The command uses bootc's native `loader-entries set-options-for-source`
+API with its own `avethyos-user` source; it does not invoke rpm-ostree or install
+packages. Image arguments, other sources, and a staged system update remain
+intact. A parameter already set elsewhere may occur more than once; precedence
+depends on that particular kernel parameter. `remove` and `reset` only remove
+your managed arguments. See the [bootc source API documentation](https://bootc.dev/bootc/internals/bootc_lib/loader_entries/index.html).
+
+Changes require a reboot. Continue using `sudo bootc upgrade` for system updates.
+If staging fails, the command reports the error and keeps the desired preferences
+marked pending. After resolving the error, run `sudo avethyos kernel apply` to
+retry. The image requires bootc 1.16.13 or newer and ostree 2026.1 or newer.
+
+## Native applications
+
+The standard image includes native RPM applications, including GNOME Disks and
+GParted. Their updates arrive with `bootc upgrade`.
+
+An arbitrary additional native RPM must become part of an OS image to retain
+that update model. Installing it with `rpm-ostree install` creates local package
+layering, which [prevents bootc upgrades](https://bootc.dev/bootc/bootc-relationships.7.html).
+A command wrapper cannot remove that restriction. [Bazzite's native RPM installation](https://docs.bazzite.gg/Installing_and_Managing_Software/rpm-ostree/)
+uses rpm-ostree layering too.
+
+To support native apps beyond the standard image, either add them to this
+project's package lists or build and publish a personal bootc image containing
+the selected RPMs. A personal image must be rebuilt when its AvethyOS base changes;
+clients then use `bootc upgrade` against that image's registry tag. Apps run on the
+host in either case. No arbitrary native app installer is provided yet.
+
 ## Local image builds
 
 Run rechunking after building and before pushing a local image:

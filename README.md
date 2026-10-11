@@ -125,7 +125,14 @@ To support native apps beyond the standard image, either add them to this
 project's package lists or build and publish a personal bootc image containing
 the selected RPMs. A personal image must be rebuilt when its AvethyOS base changes;
 clients then use `bootc upgrade` against that image's registry tag. Apps run on the
-host in either case. No arbitrary native app installer is provided yet.
+host in either case.
+
+The [`personal-image/`](personal-image/README.md) folder is a self-contained
+template for that private repository. Upload its contents to a new private
+GitHub repository and edit `packages.sh`. It builds from the published AvethyOS
+image, creates an installer ISO after image checks pass, and publishes a private
+personal image for normal bootc updates. Upstream notification hooks and scheduled
+digest checks keep it current without copying AvethyOS's sources.
 
 ## Local image builds
 

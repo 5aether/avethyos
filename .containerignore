@@ -3,6 +3,7 @@
 .agents
 .codex
 .aws
+personal-image
 cosign.key
 output
 _build*

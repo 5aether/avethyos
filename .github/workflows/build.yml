@@ -91,7 +91,7 @@ jobs:
 
       - name: Check installed desktop
         run: |
-          podman run --rm --pull=never --network=none \
+          podman run --rm --network=none \
             --volume "${PWD}/build_files/check-desktop.sh:/check-desktop.sh:ro" \
             --entrypoint /bin/bash \
             "${IMAGE_NAME}:${DEFAULT_TAG}" /check-desktop.sh

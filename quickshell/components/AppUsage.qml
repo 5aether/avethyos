@@ -8,7 +8,7 @@ import Quickshell.Io
 QtObject {
     id: root
 
-    readonly property string dir: Quickshell.env("HOME") + "/.local/share/quickshell"
+    readonly property string dir: Config.stateDir
     readonly property string file: dir + "/app-usage.json"
     property var counts: ({})
     property int revision: 0

@@ -123,11 +123,11 @@ class IconThemeQmlTests(unittest.TestCase):
             initial = make_theme(data / "icons", "Test-Local-Pack", display_name="Pretty icons")
             replacement = make_theme(system / "icons", "Test-System-Pack")
             make_theme(data / "icons", "Test-Desktop-Pack")
-            config = home / ".config/quickshell/config.ini"
+            config = home / ".local/state/avethyos/quickshell/config.ini"
             config.parent.mkdir(parents=True)
             config.write_text("[appearance]\nicon-pack = Test-Local-Pack\n")
             gtk = home / ".config/gtk-3.0/settings.ini"
-            gtk.parent.mkdir()
+            gtk.parent.mkdir(parents=True)
             gtk.write_text("[Settings]\ngtk-icon-theme-name=Test-Desktop-Pack\n")
             (home / ".local/share").mkdir(parents=True)
             (shell / "shell.qml").write_text('''import QtQuick
@@ -173,7 +173,8 @@ esac
             env = os.environ.copy()
             env.update({"HOME": str(home), "XDG_DATA_HOME": str(data), "XDG_DATA_DIRS": str(system),
                         "XDG_RUNTIME_DIR": str(runtime), "XDG_CACHE_HOME": str(directory / "cache"),
-                        "XDG_CONFIG_HOME": str(home / ".config"), "QT_QPA_PLATFORM": "offscreen",
+                        "XDG_CONFIG_HOME": str(home / ".config"), "XDG_STATE_HOME": str(home / ".local/state"),
+                        "QT_QPA_PLATFORM": "offscreen",
                         "QT_QPA_PLATFORMTHEME": "", "XDG_CURRENT_DESKTOP": "", "DESKTOP_SESSION": "",
                         "PATH": str(bin_dir) + ":" + env.get("PATH", "/usr/bin:/bin"),
                         "ICON_TEST_GSETTINGS": str(settings_log)})

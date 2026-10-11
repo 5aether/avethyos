@@ -20,7 +20,13 @@ Each directory holds one role, so a file's location tells you what it is.
 | `assets/` | Fonts and compiled Qt shaders. |
 | `scripts/` | The launcher and helpers that cannot use native Quickshell APIs. |
 | `tests/` | Unit tests and a structural QML check. |
-| `config.ini` | User settings. Watched live, so it can be edited by hand. |
+| `config.ini` | Initial defaults, copied only when user state has no settings yet. |
+
+The bootc image installs this tree at `/usr/share/avethyos/quickshell` and
+native Qt plugins at `/usr/lib64/avethyos/qt-theme`. Launchers, IPC helpers,
+QML imports, fonts and shaders use those image assets, so deploying a new image
+updates the shell on the next boot. Run `scripts/run.sh` from a checkout for
+development; code paths are resolved relative to that checkout.
 
 ### Why the singletons are separate
 
@@ -43,8 +49,12 @@ directory's `qmldir`** in the same step or it will not be found.
 
 ## Settings
 
-`config.ini` is read on startup and re-read whenever it changes on disk, so
-edits apply without a restart:
+Settings live at `${XDG_STATE_HOME:-~/.local/state}/avethyos/quickshell/config.ini`.
+They are read on startup and re-read whenever the file changes, so edits apply
+without a restart. Image upgrades preserve this file; initial login migrates an
+existing `~/.config/quickshell/config.ini` before retiring the old code tree.
+Notification history, clipboard entries and media, and application launch
+counts live beside these settings in the same user state directory.
 
 ```ini
 [appearance]
@@ -88,8 +98,8 @@ python3 scripts/material-palette.py --icons-only
 List installed packs and their exact config names with the shell running:
 
 ```sh
-qs ipc call icons list
-qs ipc call icons current
+qs -p /usr/share/avethyos/quickshell ipc call icons list
+qs -p /usr/share/avethyos/quickshell ipc call icons current
 ```
 
 The list includes `~/.icons`, `~/.local/share/icons`, `/usr/local/share/icons`,
@@ -201,15 +211,17 @@ palette for live wallpaper updates. Saved KDE GUI color schemes, including
 Dolphin's, are synchronized without replacing editor or terminal themes.
 
 Palette installation exports the style, startup plugin, QML import paths and
-palette path through the managed `hypr/theme.lua`, `environment.d`, systemd
+palette path through `${XDG_STATE_HOME:-~/.local/state}/avethyos/hypr/theme.lua`,
+`environment.d`, systemd
 and D-Bus activation environments. Every `scripts/run.sh` launch reapplies
 Avethy before the shell captures its application-launch environment. It reuses
 the cached wallpaper colors, generating them when missing or when the configured
 wallpaper changes. Direct `qs` launches also restore desktop settings during
 initialization. Startup and wallpaper changes share a lock so theme files cannot
 be mixed by simultaneous applies. The reload shortcut uses the same launcher.
-Existing Flatpak app homes receive their own copy of
-the plugins, QML style and palette, with corresponding per-app overrides.
+Host applications load plugins and QML styles directly from the current image.
+Existing Flatpak app homes receive a refreshed copy of the plugins, QML style
+and palette at each startup/theme apply, with corresponding per-app overrides.
 `QT_QPA_PLATFORMTHEME=gtk3` retains GTK native dialogs; `QT_GUI_GTK_JSON`
 supplies the GTK platform bridge with complete Qt palette roles.
 GTK theme variants are named `Avethy` and `Avethy-dark`; the KDE scheme and both
@@ -220,7 +232,8 @@ disabled text. Verify GTK menus in both modes with
 `python3 tests/check-gtk-menus.py`; GTK 2's generated RC mappings are covered by
 `python3 -m unittest discover -s tests -p 'test_*.py'`.
 
-Build the native plugins with CMake, a C++ compiler and the matching Qt
+The image builds native plugins for both Qt versions. For local development,
+build them in a checkout with CMake, a C++ compiler and the matching Qt
 development libraries, then apply the palette:
 
 ```sh
@@ -274,7 +287,7 @@ Two things worth knowing:
 To watch Qt's own hardware-acceleration decisions live:
 
 ```sh
-QT_LOGGING_RULES='qt.multimedia.ffmpeg.hwaccel.debug=true' scripts/run.sh
+QT_LOGGING_RULES='qt.multimedia.ffmpeg.hwaccel.debug=true' /usr/share/avethyos/quickshell/scripts/run.sh
 ```
 
 ### Monitor names
@@ -341,10 +354,12 @@ new entries that Quickshell's native index has not discovered yet.
 ## Running
 
 ```sh
-scripts/run.sh
+/usr/share/avethyos/quickshell/scripts/run.sh
 ```
 
-To start it at login, point your compositor's `exec-once` at that script.
+The managed Hyprland session starts this launcher at login. For development,
+run `scripts/run.sh` in a checkout. Commands below use the installed shell path;
+substitute the absolute checkout path when working on a development instance.
 
 Include `quickshell:controlcenter` in Hyprland's `no_anim` layer rule alongside
 the other shell popups. QML draws the opening and closing transitions; an
@@ -358,29 +373,32 @@ the reveal and targets the detected I²C bus to avoid scanning every monitor.
 
 ## IPC and Hyprland keybindings
 
+Select the installed shell explicitly with `-p /usr/share/avethyos/quickshell`
+for every IPC command. Replace that path with your checkout for development.
 Every popup on the bar exposes an event-driven toggle through Quickshell IPC:
 
 ```sh
-qs ipc call applauncher toggle
-qs ipc call clock toggle
-qs ipc call mediaplayer toggle
-qs ipc call clipboard toggle
-qs ipc call controlcenter toggle
+qs -p /usr/share/avethyos/quickshell ipc call applauncher toggle
+qs -p /usr/share/avethyos/quickshell ipc call clock toggle
+qs -p /usr/share/avethyos/quickshell ipc call mediaplayer toggle
+qs -p /usr/share/avethyos/quickshell ipc call clipboard toggle
+qs -p /usr/share/avethyos/quickshell ipc call controlcenter toggle
 ```
 
 The bar follows connected outputs. IPC toggles open the popup on the output
 under the cursor; clicking a bar button opens it on that bar's output.
-The same command both opens and closes its popup. Example Hyprland bindings:
+The same command both opens and closes its popup. Add bindings to your writable
+`~/.config/hypr/shortcuts.lua` using the image-managed command definitions:
 
-```ini
-bind = SUPER, SPACE, exec, qs ipc call applauncher toggle
-bind = SUPER, C, exec, qs ipc call clock toggle
-bind = SUPER, M, exec, qs ipc call mediaplayer toggle
-bind = SUPER, V, exec, qs ipc call clipboard toggle
-bind = SUPER, B, exec, qs ipc call controlcenter toggle
+```lua
+local commands = require("/usr/share/avethyos/hypr/commands.lua")
+hl.bind("SUPER + R", hl.dsp.exec_cmd(commands.applauncher))
+hl.bind("SUPER + N", hl.dsp.exec_cmd(commands.notifications))
+hl.bind("SUPER + V", hl.dsp.exec_cmd(commands.clipboard))
+hl.bind("SUPER + W", hl.dsp.exec_cmd(commands.control_center))
 ```
 
-Use `qs ipc show` to inspect the registered targets for the running shell.
+Use `qs -p /usr/share/avethyos/quickshell ipc show` to inspect the registered targets for the running shell.
 
 The workspace bar shows workspaces 1–10 with at least one open app, plus the
 focused workspace, sorted numerically. The focused workspace shows its number
@@ -390,7 +408,7 @@ icons. Each app appears once per workspace, and buttons widen to fit multiple
 apps when showing icons.
 Both directions use a 140 ms crossfade with no delay.
 
-The local `~/.config/hypr/hyprland.lua` forwards the press and release of
+The managed `/usr/share/avethyos/hypr` configuration forwards the press and release of
 `mainMod .. "_L"` and `mainMod .. "_R"` through `hl.dsp.event`, using
 `quickshell-workspace-apps,left,1` / `left,0` and `right,1` / `right,0`.
 These [Hyprland bindings](https://wiki.hypr.land/configuring/core/binds/flags/)

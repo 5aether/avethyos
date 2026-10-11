@@ -39,9 +39,9 @@ if [ $? -eq 0 ] && [ -n "$BRIGHTNESS_OUTPUT" ]; then
         PERCENT=$((CURRENT * 100 / MAX))
         
         # Trigger OSD via IPC
-        QUICKSHELL_IPC=$(command -v quickshell-ipc)
-        if [ -n "$QUICKSHELL_IPC" ]; then
-            "$QUICKSHELL_IPC" osd.brightness "$PERCENT" 2>/dev/null
+        if command -v qs >/dev/null 2>&1; then
+            shell_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+            qs -p "$shell_root" ipc call osd brightness "$PERCENT" 2>/dev/null
         fi
     fi
 fi

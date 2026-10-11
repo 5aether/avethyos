@@ -1,12 +1,12 @@
 [Unit]
-Description=Install default desktop configuration
+Description=Initialize and migrate user desktop preferences
 Before=default.target graphical-session-pre.target
 ConditionPathIsDirectory=%h
 ConditionUser=!sddm
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash /usr/libexec/avethyos-user-config
+ExecStart=/usr/bin/python3 /usr/libexec/avethyos-user-config
 RemainAfterExit=yes
 
 [Install]

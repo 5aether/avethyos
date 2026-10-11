@@ -6,7 +6,7 @@ import Quickshell.Io
 
 // Permanent, user-owned notification history.
 //
-// Stored in ~/.local/share/quickshell/notifications.json as a plain JSON array,
+// Stored in Config.stateDir/notifications.json as a plain JSON array,
 // newest first. Entries are only ever removed when the user explicitly clears
 // them, so they survive `qs` restarts, reboots and power loss.
 //
@@ -15,7 +15,7 @@ import Quickshell.Io
 QtObject {
     id: root
 
-    readonly property string dir: Quickshell.env("HOME") + "/.local/share/quickshell"
+    readonly property string dir: Config.stateDir
     readonly property string file: dir + "/notifications.json"
 
     // Newest first.
@@ -69,8 +69,7 @@ QtObject {
     }
 
     // The directory must exist before the first write, and quickshell may not
-    // have created ~/.local/share yet on a very fresh account. Quoted so a
-    // home directory containing spaces or quotes cannot break the command.
+    // have created the user state directory on a very fresh account.
     property Process ensureDir: Process {
         command: ["mkdir", "-p", root.dir]
         running: true

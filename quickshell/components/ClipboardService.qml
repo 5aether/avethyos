@@ -9,7 +9,7 @@ import Quickshell.Io
 QtObject {
     id: root
 
-    readonly property string dir: Quickshell.env("HOME") + "/.local/share/quickshell"
+    readonly property string dir: Config.stateDir
     readonly property string file: dir + "/clipboard.json"
     readonly property string mediaDir: dir + "/clipboard-media"
     readonly property string helper: Quickshell.shellPath("scripts/clipboard.py")

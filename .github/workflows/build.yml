@@ -53,6 +53,9 @@ jobs:
         run: |
           just check
 
+      - name: Check desktop installation and user migration
+        run: python3 -m unittest discover -s tests -v
+
       - name: Image Name
         id: image-name
         run: |
@@ -85,6 +88,13 @@ jobs:
             ${IMAGE_NAME} \
             ${DEFAULT_TAG} \
             ${IMAGE_VARIANT}
+
+      - name: Check installed desktop
+        run: |
+          podman run --rm --pull=never --network=none \
+            --volume "${PWD}/build_files/check-desktop.sh:/check-desktop.sh:ro" \
+            --entrypoint /bin/bash \
+            "${IMAGE_NAME}:${DEFAULT_TAG}" /check-desktop.sh
 
       - name: Rechunk image for smaller updates
         run: |

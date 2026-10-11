@@ -56,6 +56,7 @@ class AvethyPaletteTests(unittest.TestCase):
             (plugins / "styles").mkdir()
             (plugins / "styles/libavethy-style-qt6.so").touch()
             with patch.object(palette, "QT_PLUGIN_DIR", plugins), \
+                    patch.object(palette, "QT5_PLUGIN_DIR", plugins / "missing-qt5"), \
                     patch.dict(palette.os.environ, {"QT_PLUGIN_PATH": "/existing/plugins",
                                                    "QT_QPA_GENERIC_PLUGINS": "existing-driver"}):
                 environment = palette.qt_environment()
@@ -293,8 +294,9 @@ class AvethyPaletteTests(unittest.TestCase):
         self.assertEqual("Avethy", palette.gtk_theme_name("light"))
         self.assertEqual("Avethy-dark", palette.gtk_theme_name("dark"))
         self.assertEqual(palette.HOME / ".cache/avethy/palette.ini", palette.PALETTE_FILE)
-        self.assertEqual(palette.HOME / ".config/avethy", palette.QT_THEME_DIR)
-        self.assertEqual(palette.HOME / ".local/lib/avethy/qt-plugins", palette.QT_PLUGIN_DIR)
+        self.assertEqual(palette.CONFIG_HOME / "avethy", palette.QT_THEME_DIR)
+        self.assertEqual(palette.ROOT / "native/qt-theme/build-qt6/plugins", palette.QT_PLUGIN_DIR)
+        self.assertEqual(palette.ROOT / "native/qt-theme/qml", palette.QT_QML_DIR)
 
     def test_gtk2_context_menu_states_match_the_bar_and_modern_popups(self):
         for seed in ((20, 80, 140), (220, 50, 70), (40, 180, 80)):
@@ -342,7 +344,8 @@ class AvethyPaletteTests(unittest.TestCase):
             (app / "config/avethy/qt-plugins").mkdir(parents=True)
             for mode in ("dark", "light"):
                 with self.subTest(mode=mode), \
-                        patch.object(palette, "HOME", home), patch.object(palette, "QT_PLUGIN_DIR", plugins), \
+                        patch.object(palette, "HOME", home), patch.object(palette, "CONFIG_HOME", home / ".config"), \
+                        patch.object(palette, "QT_PLUGIN_DIR", plugins), \
                         patch.dict(palette.os.environ, {}, clear=True), \
                         patch.object(palette, "current_mode", side_effect=lambda requested: requested or (
                             "light" if mode == "dark" else "dark")), \
@@ -432,12 +435,17 @@ class DesktopIconThemeTests(unittest.TestCase):
         self.home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         self.root = self.home / "shell"
         self.root.mkdir()
-        self.config = self.root / "config.ini"
+        self.config = self.home / ".local/state/avethyos/quickshell/config.ini"
+        self.config.parent.mkdir(parents=True)
         self.config.write_text("[appearance]\nicon-pack = Papirus\n")
         self.roles = palette.material_roles(palette.tonal_palette((20, 80, 140)))
         for key, value in (("HOME", self.home), ("ROOT", self.root),
+                           ("CONFIG_HOME", self.home / ".config"),
+                           ("SHELL_CONFIG", self.config),
                            ("QT_THEME_DIR", self.home / ".config/avethy"),
-                           ("QT_PLUGIN_DIR", self.home / ".local/lib/avethy/qt-plugins")):
+                           ("QT_PLUGIN_DIR", self.root / "native/qt-theme/build-qt6/plugins"),
+                           ("QT5_PLUGIN_DIR", self.root / "native/qt-theme/build-qt5/plugins"),
+                           ("QT_QML_DIR", self.root / "native/qt-theme/qml")):
             stack.enter_context(patch.object(palette, key, value))
         self.run = stack.enter_context(patch.object(palette.subprocess, "run", return_value=Mock(returncode=0)))
         self.query = stack.enter_context(patch.object(palette.subprocess, "check_output", return_value="'Desktop-Pack'\n"))

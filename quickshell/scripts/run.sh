@@ -10,6 +10,41 @@ set -u
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 
+# Code lives in the bootc image; settings survive deployments in user state.
+case ${XDG_STATE_HOME:-} in
+    /*) state_root=$XDG_STATE_HOME ;;
+    *) state_root="$HOME/.local/state" ;;
+esac
+config="$state_root/avethyos/quickshell/config.ini"
+mkdir -p "$(dirname "$config")" || exit 1
+if [ ! -f "$config" ]; then
+    case ${XDG_CONFIG_HOME:-} in
+        /*) config_root=$XDG_CONFIG_HOME ;;
+        *) config_root="$HOME/.config" ;;
+    esac
+    legacy_config="$config_root/quickshell/config.ini"
+    seed_source=""
+    if [ -f "$legacy_config" ]; then
+        seed_source="$legacy_config"
+    elif [ -f "$root/config.ini" ]; then
+        seed_source="$root/config.ini"
+    fi
+    if [ -n "$seed_source" ]; then
+        pending=$(mktemp "$(dirname "$config")/.config.XXXXXX") || exit 1
+        if ! cp "$seed_source" "$pending"; then
+            rm -f "$pending"
+            exit 1
+        fi
+        # Publish a complete seed atomically. A concurrent initializer or shell
+        # can win this race; its settings always take precedence over defaults.
+        if ! ln "$pending" "$config" 2>/dev/null && [ ! -f "$config" ]; then
+            rm -f "$pending"
+            exit 1
+        fi
+        rm -f "$pending"
+    fi
+fi
+
 missing=""
 for tool in qs; do
     command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
@@ -42,7 +77,7 @@ export AVETHY_THEME_READY=1
 
 # Qt's native providers also serve tray/menu icons. Select the same pack before
 # Qt starts; application and notification icons additionally update live in QML.
-if ! icon_pack=$(python3 "$root/scripts/icon-theme.py" --config "$root/config.ini"); then
+if ! icon_pack=$(python3 "$root/scripts/icon-theme.py" --config "$config"); then
     echo "Avethy: could not read the shell icon pack; shell startup stopped" >&2
     exit 1
 fi

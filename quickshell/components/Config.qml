@@ -4,7 +4,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// User settings file: ~/.config/quickshell/config.ini
+// User settings: ${XDG_STATE_HOME:-~/.local/state}/avethyos/quickshell/config.ini
 //
 // The shell writes it, and it is a plain INI file, so you can also edit it by
 // hand, including while Quickshell is running:
@@ -31,7 +31,17 @@ import Quickshell.Io
 QtObject {
     id: root
 
-    readonly property string file: Quickshell.env("HOME") + "/.config/quickshell/config.ini"
+    readonly property string stateHome: Quickshell.env("XDG_STATE_HOME")
+    readonly property string stateDir: (stateHome.startsWith("/")
+        ? stateHome : Quickshell.env("HOME") + "/.local/state") + "/avethyos/quickshell"
+    readonly property string file: stateDir + "/config.ini"
+
+    // Direct qs launches also support a fresh user without writing into the
+    // image-managed QML tree. The normal launcher creates this before startup.
+    property Process prepareState: Process {
+        command: ["mkdir", "-p", root.stateDir]
+        running: true
+    }
 
     // Empty follows the desktop's GTK icon theme.
     property string iconPack: ""

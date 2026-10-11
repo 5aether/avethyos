@@ -33,7 +33,7 @@ class LauncherDiscoveryTests(unittest.TestCase):
             # this launcher test independent of the real desktop settings/bus.
             (shell / "scripts/material-palette.py").write_text("# Isolated desktop theme sync stub.\n")
             shutil.copy(ROOT / "modules/appSearch.js", shell / "modules")
-            config = home / ".config/quickshell/config.ini"
+            config = home / ".local/state/avethyos/quickshell/config.ini"
             config.parent.mkdir(parents=True)
             config.write_text("[appearance]\nicon-pack = TestPack\n")
             theme = home / ".local/share/icons/TestPack"
@@ -82,6 +82,7 @@ ShellRoot {
             env.update({"HOME": str(home), "XDG_DATA_HOME": str(home / ".local/share"),
                         "XDG_DATA_DIRS": str(system), "XDG_RUNTIME_DIR": str(runtime),
                         "XDG_CACHE_HOME": str(base / "cache"), "XDG_CONFIG_HOME": str(home / ".config"),
+                        "XDG_STATE_HOME": str(home / ".local/state"),
                         "QT_QPA_PLATFORM": "offscreen", "QT_QPA_PLATFORMTHEME": "", "XDG_CURRENT_DESKTOP": "",
                         "DESKTOP_SESSION": "", "QS_ICON_THEME": "TestPack"})
             for key in ["QT_QPA_GENERIC_PLUGINS", "QT_PLUGIN_PATH", "QS_CONFIG_PATH", "DISPLAY", "WAYLAND_DISPLAY"]:

@@ -1,0 +1,7 @@
+-- Your additional Hyprland preferences and application autostarts.
+-- This file is preserved across system upgrades and reloads on save.
+-- Put system session/environment changes in the image-owned modules instead.
+-- Example:
+-- hl.on("hyprland.start", function()
+--     hl.exec_cmd("kdeconnectd")
+-- end)

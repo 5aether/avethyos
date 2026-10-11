@@ -25,8 +25,17 @@ import time
 from urllib.parse import unquote, urlparse
 
 
+def xdg_directory(variable: str, fallback: Path) -> Path:
+    value = os.environ.get(variable, "")
+    return Path(value) if value and Path(value).is_absolute() else fallback
+
+
 HOME = Path.home()
 ROOT = Path(__file__).resolve().parent.parent
+CONFIG_HOME = xdg_directory("XDG_CONFIG_HOME", HOME / ".config")
+STATE_HOME = xdg_directory("XDG_STATE_HOME", HOME / ".local/state")
+SHELL_CONFIG = STATE_HOME / "avethyos/quickshell/config.ini"
+HYPR_THEME = STATE_HOME / "avethyos/hypr/theme.lua"
 # Quickshell reads this from the host session even when a launcher itself was
 # started by a sandboxed editor with an app-specific XDG_CACHE_HOME.
 CACHE = HOME / ".cache/avethy"
@@ -34,8 +43,10 @@ PALETTE_FILE = CACHE / "palette.ini"
 SCHEME_NAME = "Avethy"
 QT_STYLE_NAME = "Avethy"
 QT_QUICK_STYLE_NAME = "Avethy"
-QT_PLUGIN_DIR = HOME / ".local/lib/avethy/qt-plugins"
-QT_THEME_DIR = HOME / ".config/avethy"
+QT_PLUGIN_DIR = ROOT / "native/qt-theme/build-qt6/plugins"
+QT5_PLUGIN_DIR = ROOT / "native/qt-theme/build-qt5/plugins"
+QT_QML_DIR = ROOT / "native/qt-theme/qml"
+QT_THEME_DIR = CONFIG_HOME / "avethy"
 FALLBACK_SEED = (103, 80, 164)
 QT_COLOR_ROLES = (
     "WindowText", "Button", "Light", "Midlight", "Dark", "Mid", "Text",
@@ -68,11 +79,11 @@ def desktop_icon_theme(mode: str, config: Path | None = None) -> str:
         except (configparser.Error, OSError, UnicodeError):
             return ""
 
-    selected = value(config or ROOT / "config.ini", "appearance", "icon-pack")
+    selected = value(config or SHELL_CONFIG, "appearance", "icon-pack")
     if selected:
         return selected
     for version in ("gtk-3.0", "gtk-4.0"):
-        selected = value(HOME / ".config" / version / "settings.ini", "Settings", "gtk-icon-theme-name")
+        selected = value(CONFIG_HOME / version / "settings.ini", "Settings", "gtk-icon-theme-name")
         if selected:
             return selected.strip("\"'")
     try:
@@ -207,7 +218,7 @@ def csv_color(value: str) -> str:
 
 def wallpaper_from_config() -> str:
     parser = configparser.ConfigParser(interpolation=None)
-    parser.read(ROOT / "config.ini")
+    parser.read(SHELL_CONFIG)
     return parser.get("wallpaper", "path", fallback="").strip()
 
 
@@ -723,7 +734,7 @@ def install_gtk(role: dict[str, str], mode: str) -> None:
     install_gtk_theme(role, mode, HOME / ".local/share")
     for version in ("gtk-3.0", "gtk-4.0"):
         css = gtk_css(role, gtk4=(version == "gtk-4.0"))
-        directory = HOME / ".config" / version
+        directory = CONFIG_HOME / version
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / "gtk.css"
         preserve_once(target)
@@ -813,8 +824,7 @@ def install_flatpak_configs(role: dict[str, str], mode: str) -> None:
         atomic_write(scheme_path, kde_colors(role))
         atomic_write(config / "avethy/palette.json", qt_native_theme(role, mode, scheme_path))
         atomic_write(config / "avethy/qtquickcontrols2.conf", qt_quick_config())
-        if QT_PLUGIN_DIR.is_dir():
-            shutil.copytree(QT_PLUGIN_DIR, config / "avethy/qt-plugins", dirs_exist_ok=True)
+        copy_native_qt_plugins(config / "avethy/qt-plugins")
         sync_kde_app_schemes(config, role)
         write_ini(config / "kdeglobals", kde_updates)
 
@@ -919,23 +929,22 @@ def install_qt(role: dict[str, str], mode: str) -> None:
     scheme = kde_colors(role)
     kde_path = HOME / ".local/share/color-schemes" / f"{SCHEME_NAME}.colors"
     atomic_write(kde_path, scheme)
-    install_qtct(role, mode, HOME / ".config")
-    atomic_write(HOME / ".config/qt6ct/gtk3-palette.json", qt_gtk_bridge(role))
+    install_qtct(role, mode, CONFIG_HOME)
+    atomic_write(CONFIG_HOME / "qt6ct/gtk3-palette.json", qt_gtk_bridge(role))
     kde_updates = parse_ini_text(scheme)
     kde_updates.setdefault("General", {})["ColorScheme"] = SCHEME_NAME
     kde_updates["KDE"] = {"LookAndFeelPackage": "org.kde.breezedark.desktop" if mode == "dark" else "org.kde.breeze.desktop",
                           "contrast": "4", "widgetStyle": QT_STYLE_NAME}
     kde_updates["UiSettings"] = {"ColorScheme": SCHEME_NAME}
     kde_updates["Icons"] = {"Theme": desktop_icon_theme(mode)}
-    write_ini(HOME / ".config/kdeglobals", kde_updates)
-    sync_kde_app_schemes(HOME / ".config", role)
+    write_ini(CONFIG_HOME / "kdeglobals", kde_updates)
+    sync_kde_app_schemes(CONFIG_HOME, role)
     atomic_write(QT_THEME_DIR / "qtquickcontrols2.conf", qt_quick_config())
     # Publish the live palette last, after KDE has a complete scheme to read.
     atomic_write(QT_THEME_DIR / "palette.json", qt_native_theme(role, mode, kde_path))
-    legacy = HOME / ".config/quickshell-desktop/palette.json"
+    legacy = CONFIG_HOME / "quickshell-desktop/palette.json"
     if legacy.is_file():
         atomic_write(legacy, qt_native_theme(role, mode, kde_path))
-    install_native_qt_plugins()
 
 
 def qt_native_theme(role: dict[str, str], mode: str, scheme: Path) -> str:
@@ -974,66 +983,73 @@ def sync_kde_app_schemes(config: Path, role: dict[str, str]) -> None:
     write_ini(path, {"UiSettings": {"ColorScheme": SCHEME_NAME}})
 
 
-def install_native_qt_plugins() -> None:
-    """Install only plugins built from this repository, with no third-party engine."""
-    for major in (5, 6):
-        build = ROOT / "native/qt-theme" / f"build-qt{major}/plugins"
-        for kind in ("styles", "generic"):
+def copy_native_qt_plugins(destination: Path) -> None:
+    """Refresh sandbox copies from image assets; host apps use assets directly."""
+    for kind in ("styles", "generic"):
+        expected = set()
+        for build in (QT5_PLUGIN_DIR, QT_PLUGIN_DIR):
             for source in (build / kind).glob("libavethy-*.so"):
-                target = QT_PLUGIN_DIR / kind / source.name
+                expected.add(source.name)
+                target = destination / kind / source.name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if not target.exists() or source.read_bytes() != target.read_bytes():
                     temporary = target.with_name(target.name + ".tmp")
                     shutil.copy2(source, temporary)
                     temporary.replace(target)
-                # Existing terminals retain the previous plugin search path.
-                # Replace our old binaries there so they migrate into Avethy.
-                legacy = HOME / ".local/lib/quickshell/qt-plugins" / kind
-                previous = legacy / source.name.replace("avethy-", "quickshell-", 1)
-                if previous.is_file():
-                    temporary = previous.with_name(previous.name + ".tmp")
-                    shutil.copy2(source, temporary)
-                    temporary.replace(previous)
-    source = ROOT / "native/qt-theme/qml" / QT_QUICK_STYLE_NAME
+        # Removed plugins must disappear from this generated sandbox directory
+        # too, otherwise Qt may keep selecting code removed by an image update.
+        for previous in (destination / kind).glob("libavethy-*.so"):
+            if previous.name not in expected:
+                previous.unlink()
+    source = QT_QML_DIR / QT_QUICK_STYLE_NAME
+    target = destination / "qml" / QT_QUICK_STYLE_NAME
     if source.is_dir():
-        shutil.copytree(source, QT_PLUGIN_DIR / "qml" / QT_QUICK_STYLE_NAME, dirs_exist_ok=True)
-        legacy = HOME / ".local/lib/quickshell/qt-plugins/qml"
-        if legacy.is_dir():
-            shutil.copytree(source, legacy / QT_QUICK_STYLE_NAME, dirs_exist_ok=True)
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        source_files = {path.relative_to(source) for path in source.rglob("*") if path.is_file()}
+        for previous in target.rglob("*"):
+            if previous.is_file() and previous.relative_to(target) not in source_files:
+                previous.unlink()
+
+
+def qt_plugin_directories() -> list[Path]:
+    """Qt rejects incompatible major versions in its shared plugin search path."""
+    return [directory for directory in (QT_PLUGIN_DIR, QT5_PLUGIN_DIR) if directory.is_dir()]
 
 
 def qt_environment(mode: str | None = None) -> dict[str, str]:
     """Shared by compositor, D-Bus activation, user services and shell launches."""
-    result = {"QT_GUI_GTK_JSON": str(HOME / ".config/qt6ct/gtk3-palette.json"),
+    result = {"QT_GUI_GTK_JSON": str(CONFIG_HOME / "qt6ct/gtk3-palette.json"),
               "QT_QPA_PLATFORMTHEME": "gtk3",
               "GTK_THEME": gtk_theme_name(current_mode(mode)),
               "GTK2_RC_FILES": str(HOME / ".gtkrc-2.0")}
-    if not (QT_PLUGIN_DIR / "styles/libavethy-style-qt6.so").is_file():
+    directories = qt_plugin_directories()
+    if not any((directory / "styles" / f"libavethy-style-qt{major}.so").is_file()
+               for directory in directories for major in (5, 6)):
         return result
-    def prepend(key: str, directory: Path, separator: str = ":") -> str:
-        values = [str(directory), *os.environ.get(key, "").split(separator)]
-        legacy = str(HOME / ".local/lib/quickshell/qt-plugins")
-        return separator.join(dict.fromkeys(value for value in values
-                                             if value and value not in (legacy, legacy + "/qml")))
+    def prepend(key: str, paths: list[Path], separator: str = ":") -> str:
+        values = [*(str(path) for path in paths), *os.environ.get(key, "").split(separator)]
+        obsolete = {str(HOME / f".local/lib/{name}/qt-plugins") + suffix
+                    for name in ("quickshell", "avethy") for suffix in ("", "/qml")}
+        return separator.join(dict.fromkeys(value for value in values if value and value not in obsolete))
     generic = ["avethy-theme", *(value for value in os.environ.get("QT_QPA_GENERIC_PLUGINS", "").split(",")
                                if value != "quickshell-theme")]
     result.update({
         "QT_STYLE_OVERRIDE": QT_STYLE_NAME,
-        "QT_PLUGIN_PATH": prepend("QT_PLUGIN_PATH", QT_PLUGIN_DIR),
+        "QT_PLUGIN_PATH": prepend("QT_PLUGIN_PATH", directories),
         "QT_QPA_GENERIC_PLUGINS": ",".join(dict.fromkeys(value for value in generic if value)),
         "AVETHY_QT_THEME": str(QT_THEME_DIR / "palette.json"),
         "QT_QUICK_CONTROLS_STYLE": QT_QUICK_STYLE_NAME,
-        "QT_QUICK_CONTROLS_STYLE_PATH": str(QT_PLUGIN_DIR / "qml"),
+        "QT_QUICK_CONTROLS_STYLE_PATH": str(QT_QML_DIR),
         "QT_QUICK_CONTROLS_FALLBACK_STYLE": "Fusion",
         "QT_QUICK_CONTROLS_CONF": str(QT_THEME_DIR / "qtquickcontrols2.conf"),
-        "QML_IMPORT_PATH": prepend("QML_IMPORT_PATH", QT_PLUGIN_DIR / "qml"),
-        "QML2_IMPORT_PATH": prepend("QML2_IMPORT_PATH", QT_PLUGIN_DIR / "qml"),
+        "QML_IMPORT_PATH": prepend("QML_IMPORT_PATH", [QT_QML_DIR]),
+        "QML2_IMPORT_PATH": prepend("QML2_IMPORT_PATH", [QT_QML_DIR]),
     })
     return result
 
 
 def hyprland_theme(role: dict[str, str], bridge_path: Path, mode: str | None = None) -> str:
-    # The existing Lua theme fragment is already owned by Quickshell.
+    # This generated state is included by the immutable compositor config.
     environment = qt_environment(mode)
     environment["QT_GUI_GTK_JSON"] = str(bridge_path)
     exports = "\n".join(f"hl.env({json.dumps(key)}, {json.dumps(value, ensure_ascii=False)})"
@@ -1053,25 +1069,18 @@ hl.config({{
 
 def sync_qt_gtk_environment(role: dict[str, str], mode: str | None = None) -> None:
     """Export the generated GTK bridge to compositor and D-Bus app launches."""
-    bridge = HOME / ".config/qt6ct/gtk3-palette.json"
-    hypr = HOME / ".config/hypr"
-    config = hypr / "hyprland.lua"
-    target = hypr / "theme.lua"
-    # Only update the already-managed theme fragment, not arbitrary configs.
-    managed = target.exists() and target.read_text(encoding="utf-8").startswith(("-- Managed by the Quickshell", "-- Managed by the Avethy"))
-    if managed and config.exists() and re.search(r'require\(["\']theme["\']\)', config.read_text(encoding="utf-8")):
-        content = hyprland_theme(role, bridge, mode)
-        if target.read_text(encoding="utf-8") != content:
-            preserve_once(target)
-            atomic_write(target, content)
-            if shutil.which("hyprctl"):
-                subprocess.run(["hyprctl", "reload"], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, check=False)
+    bridge = CONFIG_HOME / "qt6ct/gtk3-palette.json"
+    content = hyprland_theme(role, bridge, mode)
+    if not HYPR_THEME.exists() or HYPR_THEME.read_text(encoding="utf-8") != content:
+        atomic_write(HYPR_THEME, content)
+        if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") and shutil.which("hyprctl"):
+            subprocess.run(["hyprctl", "reload"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False)
     environment = os.environ.copy()
     environment["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{os.getuid()}/bus"
     values = qt_environment(mode)
     # A systemd environment generator makes the same settings survive login.
-    directory = HOME / ".config/environment.d"
+    directory = CONFIG_HOME / "environment.d"
     path = directory / "90-avethy-theme.conf"
     atomic_write(path, "# Managed by the Avethy wallpaper palette.\n" +
                  "".join(f'{key}={json.dumps(value)}\n' for key, value in values.items()))
@@ -1158,7 +1167,7 @@ def apply_icon_theme(mode: str, config: Path | None = None) -> None:
     KDE's own icon loader reads kdeglobals instead; keep both in agreement.
     """
     selected = desktop_icon_theme(mode, config)
-    targets = [(HOME / ".config", HOME / ".gtkrc-2.0")]
+    targets = [(CONFIG_HOME, HOME / ".gtkrc-2.0")]
     flatpaks = HOME / ".var/app"
     if flatpaks.is_dir():
         targets.extend((app / "config", app / "config/gtk-2.0/gtkrc")

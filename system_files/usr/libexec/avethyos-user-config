@@ -1,8 +1,392 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/python3
+"""Seed user preferences and archive the old, per-user desktop implementation."""
 
-config_dir="${HOME}/.config"
-mkdir -p "$config_dir"
-xdg-user-dirs-update
+from contextlib import contextmanager
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import time
 
-cp -R --update=none /etc/skel/.config/hypr /etc/skel/.config/quickshell "$config_dir/"
+
+HYPR_DEFAULTS = Path("/usr/share/avethyos/hypr/user")
+SHELL_DEFAULTS = Path("/usr/share/avethyos/quickshell/config.ini")
+COMMANDS = "/usr/share/avethyos/hypr/commands.lua"
+LUA_LONG_STRING = re.compile(r"\[(=*)\[")
+SHORTCUT_HELP = """-- Your shortcuts are preserved across system upgrades.
+-- Use these Lua command strings in hl.dsp.exec_cmd(), for example:
+-- hl.bind("SUPER + SHIFT + R", hl.dsp.exec_cmd(commands.applauncher))
+-- commands.shell_path: read-only installed Quickshell configuration directory.
+-- commands.appmenu: toggle the application launcher.
+-- commands.applauncher: alias of appmenu.
+-- commands.control_center: toggle system controls and settings.
+-- commands.notifications: toggle the clock and notification history.
+-- commands.clipboard: toggle clipboard history.
+-- commands.screenshot: capture a frozen screen region.
+-- commands.restart_shell: safely restart the system shell.
+-- terminal: your preferred terminal command; edit its string below.
+-- fileManager: your preferred file browser command; edit its string below.
+-- mainMod: the shortcut modifier; SUPER is the Windows key, ALT is the Alt key.
+-- appmenu/control_center/notifications/clipboard/screenshot/restart_shell:
+-- local aliases of the read-only commands above; owner updates apply automatically.
+-- Define additional commands locally and bind them with hl.dsp.exec_cmd().
+"""
+
+
+def present(path):
+    # A deliberately empty file or dangling user symlink must not be replaced.
+    return os.path.lexists(path)
+
+
+def create_once(path, content):
+    """Publish a complete file atomically, without replacing an existing file."""
+    if present(path):
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".avethyos-") as pending:
+        pending.write(content)
+        pending.flush()
+        os.fsync(pending.fileno())
+        try:
+            os.link(pending.name, path)
+        except FileExistsError:
+            return False
+    return True
+
+
+def archive(source, destination):
+    if not present(source):
+        return None
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if present(destination):
+        destination = destination.with_name(destination.name + "." + str(time.time_ns()))
+    # shutil.move also preserves data when XDG_STATE_HOME is on another filesystem.
+    shutil.move(str(source), str(destination))
+    return destination
+
+
+def lua_atom_end(text, start):
+    """Skip a Lua string/comment without interpreting or executing user code."""
+    comment = text.startswith("--", start)
+    position = start + 2 if comment else start
+    long_string = LUA_LONG_STRING.match(text, position)
+    if long_string:
+        closing = "]" + long_string.group(1) + "]"
+        end = text.find(closing, position + len(long_string.group(0)))
+        return len(text) if end < 0 else end + len(closing)
+    if comment:
+        end = text.find("\n", position)
+        return len(text) if end < 0 else end
+    if text[start] in "\"'":
+        quote = text[start]
+        position = start + 1
+        while position < len(text):
+            if text[position] == "\\":
+                position += 2
+            elif text[position] == quote:
+                return position + 1
+            else:
+                position += 1
+        return len(text)
+    return None
+
+
+def lua_mask(text):
+    masked = list(text)
+    position = 0
+    while position < len(text):
+        end = lua_atom_end(text, position)
+        if end is None:
+            position += 1
+            continue
+        for index in range(position, end):
+            if masked[index] != "\n":
+                masked[index] = " "
+        position = end
+    return "".join(masked)
+
+
+def call_end(mask, start):
+    opening = mask.find("(", start)
+    depth = 0
+    for index in range(opening, len(mask)):
+        if mask[index] == "(":
+            depth += 1
+        elif mask[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    raise ValueError("unbalanced Lua call")
+
+
+def without_owned_integration(text):
+    mask = lua_mask(text)
+    ranges = []
+    for match in re.finditer(r"\bhl\.(env|layer_rule|on)\s*\(", mask):
+        end = call_end(mask, match.start())
+        if match.group(1) != "on" or re.match(
+                r"\s*['\"](?:hyprland\.start|config\.reloaded)['\"]", text[mask.find("(", match.start()) + 1:end]):
+            ranges.append((match.start(), end))
+    # The shipped Super key forwarding loop belongs to the shell integration.
+    for match in re.finditer(r"\bfor\s+_,\s*key\s+in\s+ipairs\s*\(", mask):
+        depth, pending_do = 0, 0
+        for token in re.finditer(r"\b(?:for|while|function|if|repeat|do|end|until)\b", mask[match.start():]):
+            word = token.group(0)
+            if word in {"for", "while"}:
+                depth += 1
+                pending_do += 1
+            elif word in {"function", "if", "repeat"}:
+                depth += 1
+            elif word == "do":
+                if pending_do:
+                    pending_do -= 1
+                else:
+                    depth += 1
+            else:
+                depth -= 1
+                if depth == 0:
+                    end = match.start() + token.end()
+                    body = text[match.start():end]
+                    if "quickshell-workspace-apps" in body and "key[1]" in body:
+                        ranges.append((match.start(), end))
+                    break
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    for start, end in reversed(merged):
+        text = text[:start] + text[end:]
+    return text.strip() + "\n"
+
+
+def local_declaration(text, mask, name):
+    declaration = re.search(r"(?m)^[ \t]*local[ \t]+" + re.escape(name) + r"[ \t]*=", mask)
+    return re.compile(r"[^\n]+").match(text, declaration.start()) if declaration else None
+
+
+def complete_expression(value):
+    mask = lua_mask(value)
+    if re.search(r"\b(?:function|do|then|repeat)\b", mask):
+        return False
+    stack = []
+    pairs = {")": "(", "}": "{", "]": "["}
+    for character in mask:
+        if character in "({[":
+            stack.append(character)
+        elif character in ")}]":
+            if not stack or stack.pop() != pairs[character]:
+                return False
+    # A trailing operator means the declaration continues on the next line.
+    return not stack and not re.search(r"(?:\.\.|[-+*/%=~,]|\b(?:and|or|not))\s*(?:--.*)?$", value)
+
+
+def migrate_monolith(text):
+    """Extract the known shipped layout; unfamiliar code stays in the backup."""
+    mask = lua_mask(text)
+    terminal = local_declaration(text, mask, "terminal")
+    files = local_declaration(text, mask, "fileManager")
+    main_mod = local_declaration(text, mask, "mainMod")
+    monitor = re.search(r"\bhl\.monitor\s*\(", mask)
+    appearance = re.search(r"\bhl\.config\s*\(", mask)
+    layer = re.search(r"\bhl\.layer_rule\s*\(", mask)
+    theme = next((match for match in re.finditer(r"\brequire\s*\(", mask)
+                  if re.match(r"\s*['\"]theme['\"]", text[mask.find("(", match.start()) + 1:])), None)
+    input_config = re.search(r"\bhl\.config\s*\(\s*\{\s*input\s*=", mask)
+    rules = re.search(r"\bhl\.window_rule\s*\(", mask[main_mod.end():]) if main_mod else None
+    if not all((terminal, files, main_mod, monitor, appearance, layer, theme, input_config, rules)):
+        return None
+    rules_position = main_mod.end() + rules.start()
+    rules_start = text.rfind("\n", 0, rules_position) + 1
+    positions = (monitor.start(), min(terminal.start(), files.start()), appearance.start(),
+                 layer.start(), theme.start(), input_config.start(), main_mod.start(), rules_start)
+    if tuple(sorted(positions)) != positions:
+        return None
+    # Reuse complete user preferences; shell commands and session paths come from /usr.
+    launch_preferences = [terminal, files]
+    custom_preferences = []
+    owned = {"terminal", "fileManager", "appmenu", "applauncher", "control_center", "notifications",
+             "clipboard", "screenshot", "restart_shell", "commands", "shell_path", "data_dirs", "user_exports", "runtime_dir"}
+    for match in re.finditer(r"(?m)^[ \t]*local[ \t]+(\w+)[ \t]*=", mask[:appearance.start()]):
+        if match.group(1) not in owned:
+            declaration = re.compile(r"[^\n]+").match(text, match.start())
+            launch_preferences.append(declaration)
+            custom_preferences.append(match.group(1))
+    launch_preferences = [match.group(0) for match in sorted(launch_preferences, key=lambda match: match.start())]
+    for declaration in launch_preferences:
+        value = declaration.split("=", 1)[1].strip()
+        if not complete_expression(value):
+            return None
+    commands = ["appmenu", "control_center", "notifications", "clipboard", "screenshot", "restart_shell"]
+    prefix = SHORTCUT_HELP
+    prefix += "".join(f"-- {name}: migrated user command or preference; edit its value below.\n" for name in custom_preferences)
+    prefix += f'local commands = require("{COMMANDS}")\n'
+    prefix += "".join(f"local {name} = commands.{name}\n" for name in commands)
+    prefix += "".join(declaration.strip() + "\n" for declaration in launch_preferences)
+    shortcuts = without_owned_integration(text[main_mod.start():rules_start])
+    shortcuts = re.sub(
+        r"(['\"])(?:bash\s+)?(?:~/\.config/hypr/scripts|/[^'\"\n]+/\.config/hypr/scripts)/reload-qs\.sh\1",
+        "restart_shell", shortcuts)
+    return {
+        "monitors.lua": without_owned_integration(text[monitor.start():positions[1]]),
+        "appearance.lua": without_owned_integration(text[appearance.start():layer.start()] +
+                              text[call_end(mask, theme.start()):input_config.start()]),
+        "input.lua": without_owned_integration(text[input_config.start():main_mod.start()]),
+        "shortcuts.lua": prefix + shortcuts,
+        "window-rules.lua": without_owned_integration(text[rules_start:]),
+    }
+
+
+@contextmanager
+def initialization_lock(state):
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / "user-config.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def rewrite_clipboard_paths(value, replacements):
+    if isinstance(value, list):
+        return [rewrite_clipboard_paths(item, replacements) for item in value]
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key in {"payload", "preview"} and isinstance(item, str):
+                for old, new in replacements.items():
+                    if item.startswith(old + "/"):
+                        item = new + item[len(old):]
+                        break
+                result[key] = item
+            else:
+                result[key] = rewrite_clipboard_paths(item, replacements)
+        return result
+    return value
+
+
+def migrate_shell_data(home, data_home, state, report):
+    roots = [home / ".local/share/quickshell"]
+    if data_home is not None and Path(data_home) / "quickshell" not in roots:
+        roots.append(Path(data_home) / "quickshell")
+    destination = state / "quickshell"
+    media = destination / "clipboard-media"
+    replacements = {}
+    for source in roots:
+        old_media = source / "clipboard-media"
+        if old_media.is_dir() and not present(media):
+            destination.mkdir(parents=True, exist_ok=True)
+            # Keep original media as a recovery copy and for existing JSON references.
+            with tempfile.TemporaryDirectory(dir=destination, prefix=".avethyos-media-") as pending:
+                staged = Path(pending) / "clipboard-media"
+                shutil.copytree(old_media, staged, symlinks=True)
+                if not present(media):
+                    staged.rename(media)
+                    replacements[str(old_media)] = str(media)
+                    report.append(f"Copied clipboard media from {old_media} to {media}; original retained.")
+    for source in roots:
+        for name in ("notifications.json", "clipboard.json", "app-usage.json"):
+            previous, target = source / name, destination / name
+            if previous.is_file() and not present(target):
+                content = previous.read_bytes()
+                if name == "clipboard.json" and replacements:
+                    try:
+                        entries = rewrite_clipboard_paths(json.loads(content), replacements)
+                        content = (json.dumps(entries, ensure_ascii=False) + "\n").encode()
+                    except (ValueError, UnicodeError):
+                        pass  # Keep malformed legacy history intact for recovery.
+                if create_once(target, content):
+                    report.append(f"Copied {previous} to {target}; original retained.")
+
+
+def initialize(home, config_home=None, state_home=None, data_home=None, *, hypr_defaults=HYPR_DEFAULTS,
+               shell_defaults=SHELL_DEFAULTS):
+    """Initialize an account. Explicit source arguments are for isolated tests only."""
+    home = Path(home)
+    config = Path(config_home) if config_home is not None else home / ".config"
+    state = (Path(state_home) if state_home is not None else home / ".local/state") / "avethyos"
+    hypr_defaults, shell_defaults = Path(hypr_defaults), Path(shell_defaults)
+    # Validate image assets before moving any existing account files.
+    defaults = {path.name: path.read_bytes() for path in hypr_defaults.iterdir() if path.is_file()}
+    shell_default = shell_defaults.read_bytes()
+    preferences = state / "quickshell/config.ini"
+    migration_done = state / "user-config-v1"
+    with initialization_lock(state):
+        if not present(migration_done):
+            report = []
+            migrate_shell_data(home, data_home, state, report)
+            roots = [config]
+            if config != home / ".config":
+                roots.append(home / ".config")
+            backup = state / "legacy-desktop"
+            for index, old_config in enumerate(roots):
+                label = "" if index == 0 else "home-"
+                shell = old_config / "quickshell"
+                old_preferences = shell / "config.ini"
+                if old_preferences.is_file():
+                    create_once(preferences, old_preferences.read_bytes())
+                saved = archive(shell, backup / (label + "quickshell"))
+                if saved:
+                    report.append(f"Archived {shell} to {saved}.")
+                old_hypr = old_config / "hypr"
+                monolith = old_hypr / "hyprland.lua"
+                # Recover the fixed first backup if a previous attempt stopped mid-migration.
+                saved_monolith = backup / (label + "hypr") / "hyprland.lua"
+                saved = archive(monolith, saved_monolith)
+                if saved:
+                    saved_monolith = saved
+                if saved_monolith.is_file():
+                    try:
+                        extracted = migrate_monolith(saved_monolith.read_text())
+                    except (ValueError, UnicodeError):
+                        extracted = None
+                    if extracted:
+                        for name, content in extracted.items():
+                            create_once(config / "hypr" / name, content.encode())
+                        report.append(f"Migrated writable settings from {saved_monolith}.")
+                    else:
+                        report.append(f"Unrecognized Lua layout in {saved_monolith}; retained for manual recovery in hypr/custom.lua.")
+                for name in ("theme.lua", "scripts/reload-qs.sh"):
+                    # User-created helpers remain at their original paths, including symlinks.
+                    if name.startswith("scripts/") and (old_hypr / "scripts").is_symlink():
+                        continue
+                    saved = archive(old_hypr / name, backup / (label + "hypr") / name)
+                    if saved:
+                        report.append(f"Archived {old_hypr / name} to {saved}.")
+                scripts = old_hypr / "scripts"
+                if scripts.is_dir() and not scripts.is_symlink() and not any(scripts.iterdir()):
+                    scripts.rmdir()
+            if report:
+                backup.mkdir(parents=True, exist_ok=True)
+                with (backup / "MIGRATION.txt").open("a") as summary:
+                    summary.write("\n".join(report) + "\n")
+            # Complete seeding before recording migration success, so interrupted runs retry.
+            for name, content in defaults.items():
+                create_once(config / "hypr" / name, content)
+            create_once(preferences, shell_default)
+            create_once(migration_done, b"1\n")
+        else:
+            for name, content in defaults.items():
+                create_once(config / "hypr" / name, content)
+            create_once(preferences, shell_default)
+
+
+def xdg_directory(variable, fallback):
+    value = os.environ.get(variable, "")
+    return Path(value) if value and Path(value).is_absolute() else fallback
+
+
+def main():
+    home = Path(os.environ["HOME"])
+    initialize(home, xdg_directory("XDG_CONFIG_HOME", home / ".config"),
+               xdg_directory("XDG_STATE_HOME", home / ".local/state"),
+               xdg_directory("XDG_DATA_HOME", home / ".local/share"))
+    if shutil.which("xdg-user-dirs-update"):
+        subprocess.run(["xdg-user-dirs-update"], check=True)
+
+
+if __name__ == "__main__":
+    main()

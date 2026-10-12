@@ -89,7 +89,7 @@ class Bridge:
         self.runtime = Path(runtime).absolute()
         self.directory = self.runtime / "discord-rpc"
         self.targets = {}
-        self.servers = []
+        self.servers = {}
         self.connections = set()
         self.lock = None
 
@@ -97,7 +97,7 @@ class Bridge:
         return sorted(path for path in self.runtime.glob(".flatpak/*/xdg-run")
                       if path.is_dir() and not path.is_symlink())
 
-    def refresh(self):
+    async def refresh(self):
         listeners = listening_sockets()
         for slot in SLOTS:
             canonical = self.runtime / f"discord-ipc-{slot}"
@@ -137,6 +137,20 @@ class Bridge:
                     break
         self.targets = targets
 
+        # Producers stop scanning at the first successful connect(). Publish
+        # only live slots, so an empty proxy cannot hide a later Discord client.
+        # Keep the directory itself stable for existing Flatpak/Steam mounts.
+        for slot in self.servers.keys() - targets.keys():
+            server = self.servers.pop(slot)
+            server.close()
+            (self.directory / f"discord-ipc-{slot}").unlink(missing_ok=True)
+        for slot in targets.keys() - self.servers.keys():
+            path = self.directory / f"discord-ipc-{slot}"
+            self.servers[slot] = await asyncio.start_unix_server(
+                lambda reader, writer, index=slot: self.accept(index, reader, writer),
+                path=str(path))
+            path.chmod(0o600)
+
         # Modern Flatpak binds its private runtime directory into the sandbox.
         # Relative targets resolve through the narrow shared directory there
         # and on the host. Never replace an app's real socket or own link.
@@ -151,9 +165,12 @@ class Bridge:
                 elif owns_link(path, slot):
                     path.unlink(missing_ok=True)
 
+    def accept(self, slot, reader, writer):
+        task = asyncio.create_task(self.relay(slot, reader, writer))
+        self.connections.add(task)
+        task.add_done_callback(self.connections.discard)
+
     async def relay(self, slot, reader, writer):
-        current = asyncio.current_task()
-        self.connections.add(current)
         upstream = None
         pumps = []
         try:
@@ -184,7 +201,6 @@ class Bridge:
                         await stream.wait_closed()
                     except OSError:
                         pass
-            self.connections.discard(current)
 
     async def start(self):
         self.directory.mkdir(mode=0o700, exist_ok=True)
@@ -197,20 +213,18 @@ class Bridge:
                 if not stat.S_ISSOCK(path.lstat().st_mode):
                     raise RuntimeError(f"Unexpected file at {path}")
                 path.unlink()
-            server = await asyncio.start_unix_server(
-                lambda reader, writer, index=slot: self.relay(index, reader, writer),
-                path=str(path))
-            path.chmod(0o600)
-            self.servers.append(server)
-        self.refresh()
+        await self.refresh()
 
     async def stop(self):
-        for server in self.servers:
+        for server in self.servers.values():
             server.close()
-            await server.wait_closed()
         for task in tuple(self.connections):
             task.cancel()
         await asyncio.gather(*self.connections, return_exceptions=True)
+        for slot, server in self.servers.items():
+            await server.wait_closed()
+            (self.directory / f"discord-ipc-{slot}").unlink(missing_ok=True)
+        self.servers.clear()
         if self.lock is not None:
             self.lock.close()
 
@@ -222,7 +236,7 @@ class Bridge:
         try:
             await self.start()
             while not done.is_set():
-                self.refresh()
+                await self.refresh()
                 try:
                     await asyncio.wait_for(done.wait(), timeout=0.5)
                 except TimeoutError:

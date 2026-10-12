@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import stat
 import struct
 import subprocess
@@ -99,10 +100,112 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await writer.wait_closed()
 
+    async def connect_first_available(self, directory):
+        # rpc-bridge and Discord's SDK return on the first connect() success;
+        # they do not continue to a later index when that socket then sends EOF.
+        for slot in range(10):
+            try:
+                reader, writer = await asyncio.open_unix_connection(
+                    str(directory / f"discord-ipc-{slot}"))
+            except OSError:
+                continue
+            return slot, reader, writer
+        raise ConnectionError("No Discord RPC socket")
+
+    async def assert_first_provider(self, slot):
+        selected, reader, writer = await self.connect_first_available(self.bridge.directory)
+        try:
+            self.assertEqual(slot, selected)
+            handshake = frame(0, b'{"v":1,"client_id":"proton-game"}')
+            writer.write(handshake)
+            await writer.drain()
+            self.assertEqual(handshake, await asyncio.wait_for(reader.readexactly(len(handshake)), 2))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_producer_scans_to_nonzero_provider_without_inactive_proxies(self):
+        provider_path = self.runtime / "app/example.Discord/discord-ipc-7"
+        await self.provider(provider_path)
+        await self.bridge.refresh()
+        self.assertEqual(["discord-ipc-7"],
+                         sorted(path.name for path in self.bridge.directory.glob("discord-ipc-*")))
+        await self.assert_first_provider(7)
+
+    async def test_producer_skips_closed_lower_slot_and_reconnects_after_restart(self):
+        lower = self.runtime / "app/example.A/discord-ipc-0"
+        later = self.runtime / "app/example.B/discord-ipc-7"
+        first = await self.provider(lower)
+        second = await self.provider(later)
+        await self.bridge.refresh()
+        directory_inode = self.bridge.directory.stat().st_ino
+        await self.assert_first_provider(0)
+        first.close()
+        await first.wait_closed()
+        await self.bridge.refresh()
+        self.assertFalse(os.path.lexists(self.bridge.directory / "discord-ipc-0"))
+        await self.assert_first_provider(7)
+        second.close()
+        await second.wait_closed()
+        await self.bridge.refresh()
+        with self.assertRaises(ConnectionError):
+            await self.connect_first_available(self.bridge.directory)
+        later.unlink(missing_ok=True)
+        await self.provider(later)
+        await self.bridge.refresh()
+        self.assertEqual(directory_inode, self.bridge.directory.stat().st_ino)
+        await self.assert_first_provider(7)
+
+    async def test_bridge_start_removes_old_inactive_proxy_socket_files(self):
+        await self.bridge.stop()
+        self.bridge = rpc.Bridge(self.runtime)
+        stale = self.bridge.directory / "discord-ipc-0"
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(stale))
+        await self.bridge.start()
+        self.assertFalse(os.path.lexists(stale))
+        self.assertEqual({}, self.bridge.servers)
+
+    async def test_listener_refresh_keeps_established_connections_running(self):
+        provider = await self.provider(self.runtime / "app/example.Discord/discord-ipc-7")
+        await self.bridge.refresh()
+        reader, writer = await asyncio.open_unix_connection(
+            str(self.bridge.directory / "discord-ipc-7"))
+        try:
+            writer.write(b"connected")
+            await writer.drain()
+            self.assertEqual(b"connected", await asyncio.wait_for(reader.readexactly(9), 2))
+            provider.close()
+            # wait_closed() waits for established streams in modern Python.
+            # Removing an inactive listener must not wait for those streams.
+            await asyncio.wait_for(self.bridge.refresh(), 2)
+            self.assertFalse(os.path.lexists(self.bridge.directory / "discord-ipc-7"))
+            writer.write(b"still connected")
+            await writer.drain()
+            self.assertEqual(b"still connected", await asyncio.wait_for(reader.readexactly(15), 2))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_stop_closes_established_connections_without_waiting_for_clients(self):
+        await self.provider(self.runtime / "app/example.Discord/discord-ipc-0")
+        await self.bridge.refresh()
+        reader, writer = await asyncio.open_unix_connection(
+            str(self.bridge.directory / "discord-ipc-0"))
+        try:
+            writer.write(b"connected")
+            await writer.drain()
+            self.assertEqual(b"connected", await asyncio.wait_for(reader.readexactly(9), 2))
+            await asyncio.wait_for(self.bridge.stop(), 2)
+            self.assertEqual(b"", await asyncio.wait_for(reader.read(), 2))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
     async def test_native_source_to_unknown_flatpak_client_preserves_all_rpc_bytes(self):
         socket = self.runtime / ".flatpak/example.NewClient/xdg-run/discord-ipc-7"
         await self.provider(socket)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertEqual(socket, self.bridge.targets[7])
         payload = (frame(0, b'{"v":1,"client_id":"steam-game"}')
                    + frame(1, json.dumps({"cmd": "SET_ACTIVITY", "args": {
@@ -122,12 +225,12 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_flatpak_source_opened_first_reaches_later_native_client(self):
         consumer = self.sandbox("example.Player")
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertFalse((consumer / "discord-ipc-0").exists())
         native = self.runtime / "discord-ipc-0"
         await self.provider(native)
         before = native.lstat()
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertFalse(native.is_symlink())
         self.assertEqual(before.st_ino, native.lstat().st_ino)
         await self.roundtrip(consumer / "discord-ipc-0")
@@ -136,7 +239,7 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
         consumer = self.sandbox("example.Steam")
         socket = self.runtime / "app/example.AnotherDiscord/discord-ipc-4"
         await self.provider(socket)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         await self.roundtrip(consumer / "discord-ipc-4")
 
     async def test_multiple_clients_are_assigned_separate_stable_slots(self):
@@ -145,9 +248,9 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
         second = self.runtime / "app/example.B/discord-ipc-0"
         for path in (native, first, second):
             await self.provider(path)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertEqual({0: native, 1: first, 2: second}, self.bridge.targets)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertEqual({0: native, 1: first, 2: second}, self.bridge.targets)
         for slot in (1, 2):
             await self.roundtrip(self.runtime / f"discord-ipc-{slot}")
@@ -155,11 +258,11 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_socket_replacing_bridge_link_keeps_its_slot(self):
         exported = self.runtime / "app/example.A/discord-ipc-0"
         await self.provider(exported)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         native = self.runtime / "discord-ipc-0"
         native.unlink()
         await self.provider(native)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertEqual({0: native, 1: exported}, self.bridge.targets)
         self.assertFalse(native.is_symlink())
         await self.roundtrip(self.runtime / "discord-ipc-1")
@@ -167,10 +270,10 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
     async def test_closed_client_socket_is_not_a_live_provider(self):
         socket = self.runtime / "app/example.A/discord-ipc-0"
         server = await self.provider(socket)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         server.close()
         await server.wait_closed()
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertEqual({}, self.bridge.targets)
         self.assertFalse(os.path.lexists(self.runtime / "discord-ipc-0"))
 
@@ -178,22 +281,22 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
         consumer = self.sandbox("example.Steam")
         socket = self.runtime / "app/example.A/discord-ipc-0"
         server = await self.provider(socket)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         directory_inode = self.bridge.directory.stat().st_ino
         await self.roundtrip(consumer / "discord-ipc-0")
         server.close()
         await server.wait_closed()
-        self.bridge.refresh()
+        await self.bridge.refresh()
         socket.unlink(missing_ok=True)
         await self.provider(socket)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertEqual(directory_inode, self.bridge.directory.stat().st_ino)
         await self.roundtrip(consumer / "discord-ipc-0", b"after restart")
 
     async def test_bridge_restart_preserves_directory_and_ignores_its_links(self):
         socket = self.runtime / "app/example.A/discord-ipc-0"
         await self.provider(socket)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         inode = self.bridge.directory.stat().st_ino
         await self.bridge.stop()
         self.bridge = rpc.Bridge(self.runtime)
@@ -209,7 +312,7 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
         own_file.write_text("keep me")
         socket = self.runtime / "app/example.A/discord-ipc-0"
         await self.provider(socket)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertEqual("discord-ipc-0", os.readlink(own_link))
         self.assertEqual("keep me", own_file.read_text())
         self.assertEqual({2: socket}, self.bridge.targets)
@@ -220,14 +323,14 @@ class DiscordRPCTests(unittest.IsolatedAsyncioTestCase):
         stale.symlink_to(".flatpak/com.discordapp.Discord/xdg-run/discord-ipc-0")
         user_link = self.runtime / "discord-ipc-1"
         user_link.symlink_to(".flatpak/example.Mine/xdg-run/discord-ipc-1")
-        self.bridge.refresh()
+        await self.bridge.refresh()
         self.assertFalse(os.path.lexists(stale))
         self.assertTrue(user_link.is_symlink())
 
     async def test_half_close_delivers_pending_provider_bytes(self):
         socket = self.runtime / "app/example.A/discord-ipc-0"
         await self.provider(socket)
-        self.bridge.refresh()
+        await self.bridge.refresh()
         reader, writer = await asyncio.open_unix_connection(str(self.runtime / "discord-ipc-0"))
         writer.write(b"final bytes")
         await writer.drain()
@@ -266,11 +369,11 @@ server.close()
                     self.skipTest(error.strip())
                 self.fail(error)
             self.assertEqual(b"ready\n", ready)
-            self.bridge.refresh()
+            await self.bridge.refresh()
             self.assertEqual({0: private / "discord-ipc-0"}, self.bridge.targets)
             await self.roundtrip(self.runtime / "discord-ipc-0")
             self.assertEqual(0, await asyncio.wait_for(child.wait(), 2))
-            self.bridge.refresh()
+            await self.bridge.refresh()
             self.assertEqual({}, self.bridge.targets)
         finally:
             if child.returncode is None:
@@ -333,14 +436,14 @@ for message in (b"first", b"restarted"):
             await self.bridge.start()
             socket = self.runtime / "app/example.A/discord-ipc-0"
             server = await self.provider(socket)
-            self.bridge.refresh()
+            await self.bridge.refresh()
             self.assertEqual(b"first\n", await asyncio.wait_for(child.stdout.readline(), 3))
             server.close()
             await server.wait_closed()
-            self.bridge.refresh()
+            await self.bridge.refresh()
             socket.unlink(missing_ok=True)
             await self.provider(socket)
-            self.bridge.refresh()
+            await self.bridge.refresh()
             child.stdin.write(b"reconnect\n")
             await child.stdin.drain()
             self.assertEqual(b"restarted\n", await asyncio.wait_for(child.stdout.readline(), 3))

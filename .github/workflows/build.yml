@@ -151,7 +151,7 @@ jobs:
         if: env.PUBLISH == 'true'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          cosign-release: 'v3.1.2'
+          cosign-release: 'v3.1.3'
 
       - name: Check the release key against our public key
         if: env.PUBLISH == 'true'
@@ -289,8 +289,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          cosign verify --key cosign.pub "${IMAGE_REF}@${DIGEST}" > "$IMAGE_ARTIFACTS/image-signature.json"
-          cosign verify --key cosign.pub "${IMAGE_REF}@${SBOM_DIGEST}" > "$IMAGE_ARTIFACTS/sbom-signature.json"
+          # Verify the same key signature format used by bootc and our signer.
+          cosign verify --new-bundle-format=false --key cosign.pub "${IMAGE_REF}@${DIGEST}" > "$IMAGE_ARTIFACTS/image-signature.json"
+          cosign verify --new-bundle-format=false --key cosign.pub "${IMAGE_REF}@${SBOM_DIGEST}" > "$IMAGE_ARTIFACTS/sbom-signature.json"
           sbom_file_digest="sha256:$(sha256sum "$IMAGE_ARTIFACTS/sbom.spdx.json" | cut -d ' ' -f1)"
           oras manifest fetch "${IMAGE_REF}@${SBOM_DIGEST}" > "$IMAGE_ARTIFACTS/sbom.manifest.json"
           jq -e --arg image "$DIGEST" --arg file "$sbom_file_digest" '

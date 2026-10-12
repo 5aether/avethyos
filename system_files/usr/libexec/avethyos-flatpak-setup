@@ -1,6 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+# Apply at boot: /var/lib/flatpak persists across bootc upgrades and therefore
+# cannot receive new image defaults just by writing overrides during a build.
+# Sharing one directory keeps sandbox mounts valid after Discord restarts.
+rpc_overrides="${FLATPAK_SYSTEM_DIR:-/var/lib/flatpak}/overrides/global"
+# Remove the old image's exact generated file; keep customized overrides.
+if [[ -f "$rpc_overrides" && $(< "$rpc_overrides") == $'[Context]\nfilesystems=xdg-run;xdg-run/discord-ipc-*:create;' ]]; then
+    rm "$rpc_overrides"
+fi
+flatpak override --system --filesystem=xdg-run/discord-rpc:ro
+
 # remotes.d does not replace a Flathub remote inherited from an earlier OS.
 remote_list=$(flatpak remotes --system --columns=name,filter:full)
 flathub_found=false

@@ -23,7 +23,12 @@ for repo_dir in /etc/yum.repos.d /etc/distro.repos.d /usr/share/dnf5/repos.d; do
         "${repo_dir}"/*copr*lilay*topgrade*.repo
 done
 
-dnf5 clean all
+# /var/cache is a build cache mount, so these downloads never enter the image.
+# Keep them for later builds rather than erasing the runner's package cache.
+
+install -Dm644 /ctx/docs/README.md /usr/share/doc/avethyos/README.md
+install -Dm644 /ctx/docs/personal.md /usr/share/doc/avethyos/personal/README.md
+install -Dm644 /ctx/docs/LICENSE /usr/share/doc/avethyos/LICENSE
 
 # Apply branding after package installs so the initramfs includes AvethyOS names.
 bash /ctx/layers/branding.sh

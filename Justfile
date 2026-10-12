@@ -1,448 +1,108 @@
 set dotenv-filename := "image-template.env"
 set dotenv-load
+set positional-arguments
 
-export image_name := env_var("IMAGE_NAME")
-export repo_organization := env_var("REPO_ORGANIZATION")
-export image_desc := env_var("IMAGE_DESC")
-export image_keywords := env_var("IMAGE_KEYWORDS")
-export image_logo_url := env_var("IMAGE_LOGO_URL")
-export default_tag := env_var("DEFAULT_TAG")
-export nvidia_tag := if default_tag == "latest" { "nvidia" } else { default_tag + "-nvidia" }
-export bib_image := env_var("BIB_IMAGE")
+image_name := env_var("IMAGE_NAME")
+default_tag := env_var("DEFAULT_TAG")
+nvidia_tag := if default_tag == "latest" { "nvidia" } else { default_tag + "-nvidia" }
 
 alias build-vm := build-iso
 alias rebuild-vm := rebuild-iso
 alias run-vm := run-vm-iso
 
-[private]
+# List image development commands. On the installed OS, use avethyos instead.
 default:
     @just --list
 
-# Check Just Syntax
-[group('Just')]
+# Check formatting of the repository's recipe files.
 check:
     #!/usr/bin/env bash
-    find . -type f -name "*.just" | while read -r file; do
-    	echo "Checking syntax: $file"
-    	just --unstable --fmt --check -f $file
-    done
-    echo "Checking syntax: Justfile"
-    just --unstable --fmt --check -f Justfile
+    set -euo pipefail
+    files=$(rg --files --hidden -g '*.just' -g Justfile -g '!personal/**')
+    while IFS= read -r file; do
+        just --unstable --fmt --check --justfile "$file"
+    done <<< "$files"
 
-# Fix Just Syntax
-[group('Just')]
+# Format the repository's recipe files.
 fix:
     #!/usr/bin/env bash
-    find . -type f -name "*.just" | while read -r file; do
-    	echo "Checking syntax: $file"
-    	just --unstable --fmt -f $file
-    done
-    echo "Checking syntax: Justfile"
-    just --unstable --fmt -f Justfile || { exit 1; }
+    set -euo pipefail
+    files=$(rg --files --hidden -g '*.just' -g Justfile -g '!personal/**')
+    while IFS= read -r file; do
+        just --unstable --fmt --justfile "$file"
+    done <<< "$files"
 
-# Clean Repo
-[group('Utility')]
-clean:
-    #!/usr/bin/env bash
-    set -eoux pipefail
-    touch _build
-    find *_build* -exec rm -rf {} \;
-    rm -f previous.manifest.json
-    rm -f changelog.md
-    rm -f output.env
-    rm -rf output/
+# Build the standard image, or pass a name, tag and variant.
+build target_image=image_name tag=default_tag variant="standard":
+    bash build_files/build-image.sh "$1" "$2" "$3"
 
-# Sudo Clean Repo
-[group('Utility')]
+# Build the NVIDIA variant only.
+build-nvidia target_image=image_name tag=nvidia_tag:
+    bash build_files/build-image.sh "$1" "$2" nvidia
+
+# Check packages, bootc layout, kernel, and the installed desktop.
+check-image target_image=image_name tag=default_tag variant="standard":
+    bash build_files/ci/check-image.sh "$1:$2" "$3"
+
+# Arrange reusable layers for smaller downloads on future updates.
+rechunk target_image=image_name tag=default_tag:
+    bash build_files/rechunk-image.sh "$1" "$2"
+
+# Build an installer ISO from a local or remote image.
+build-iso target_image=("localhost/" + image_name) tag=default_tag:
+    bash build_files/build-iso.sh "$1" "$2" output
+
+# Build an installer ISO from the NVIDIA image.
+build-iso-nvidia target_image=("localhost/" + image_name) tag=nvidia_tag:
+    bash build_files/build-iso.sh "$1" "$2" output/nvidia
+
+# Build a fresh standard image and its installer.
+rebuild-iso target_image=("localhost/" + image_name) tag=default_tag: (build target_image tag) && (build-iso target_image tag)
+
+# Build a fresh NVIDIA image and its installer.
+rebuild-iso-nvidia target_image=("localhost/" + image_name) tag=nvidia_tag: (build-nvidia target_image tag) && (build-iso-nvidia target_image tag)
+
+# Start an isolated virtual machine using the standard installer.
+run-vm-iso target_image=("localhost/" + image_name) tag=default_tag:
+    bash build_files/run-vm.sh "$1" "$2"
+
+# Release tag helpers consumed by GitHub Actions.
 [private]
-sudo-clean:
-    just sudoif just clean
+image_name:
+    @echo "{{ image_name }}"
 
-# sudoif bash function
-[group('Utility')]
 [private]
-sudoif command *args:
-    #!/usr/bin/env bash
-    function sudoif(){
-        if [[ "${UID}" -eq 0 ]]; then
-            "$@"
-        elif [[ "$(command -v sudo)" && -n "${SSH_ASKPASS:-}" ]] && [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
-            sudo --askpass "$@" || exit 1
-        elif [[ "$(command -v sudo)" ]]; then
-            sudo "$@" || exit 1
-        else
-            exit 1
-        fi
-    }
-    sudoif {{ command }} {{ args }}
+generate-default-tag:
+    @echo "{{ default_tag }}"
 
-# This Justfile recipe builds a container image using Podman.
-#
-# Arguments:
-#   $target_image - The tag you want to apply to the image (default: $image_name).
-#   $tag - The tag for the image (default: $default_tag).
-#
-# The script constructs the version string using the tag and the current date.
-# If the git working directory is clean, it also includes the short SHA of the current HEAD.
-#
-# just build $target_image $tag
-#
-# Example usage:
-#   just build myimage mytag
-#
-# This will build an image 'myimage:mytag'
-#
-
-# Build the image using the specified parameters
-build $target_image=image_name $tag=default_tag $variant="standard":
-    #!/usr/bin/env bash
-
-    set -euox pipefail
-
-    case "${variant}" in
-        standard|nvidia) ;;
-        *) echo "Unknown image variant: ${variant}" >&2; exit 1 ;;
-    esac
-
-    BUILD_ARGS=()
-    LABELS=()
-
-    # Resolve before the cached build so a new OGC release invalidates its layer.
-    OGC_KERNEL_DIGEST=$(podman run --rm --pull=newer ghcr.io/oras-project/oras:v1.3.4 \
-        resolve --full-reference "${OGC_KERNEL_REF:-ghcr.io/opengamingcollective/kernel-packages-fedora:latest-fc44}")
-    BUILD_ARGS+=(--build-arg "OGC_KERNEL_REF=${OGC_KERNEL_DIGEST}")
-
-    if [[ -z "$(git status -s)" ]]; then
-        GIT_SHA=$(git rev-parse --short HEAD)
-        LABELS+=("--label" "io.artifacthub.package.readme-url=https://raw.githubusercontent.com/{{ repo_organization }}/{{ image_name }}/${GIT_SHA}/README.md")
-        LABELS+=("--label" "org.opencontainers.image.documentation=https://raw.githubusercontent.com/{{ repo_organization }}/{{ image_name }}/${GIT_SHA}/README.md")
-        LABELS+=("--label" "org.opencontainers.image.source=https://github.com/{{ repo_organization }}/{{ image_name }}/blob/${GIT_SHA}/Containerfile")
-        LABELS+=("--label" "org.opencontainers.image.url=https://github.com/{{ repo_organization }}/{{ image_name }}/tree/${GIT_SHA}")
-        LABELS+=("--label" "org.opencontainers.image.version=${tag}.$(date +%Y%m%d)-${GIT_SHA}")
-    fi
-
-    # Image metadata for https://artifacthub.io/ - This is optional but is highly recommended so we all can get a index of all the custom images
-    # The metadata by itself is not going to do anything, you choose if you want your image to be on ArtifactHub or not.
-    LABELS+=("--label" "io.artifacthub.package.deprecated=false")
-    LABELS+=("--label" "io.artifacthub.package.keywords={{ image_keywords }}")
-    LABELS+=("--label" "io.artifacthub.package.license=Apache-2.0")
-    LABELS+=("--label" "io.artifacthub.package.logo-url={{ image_logo_url }}")
-    LABELS+=("--label" "io.artifacthub.package.prerelease=false")
-    LABELS+=("--label" "org.opencontainers.image.created=$(date -u +%Y\-%m\-%d\T%H\:%M\:%S\Z)")
-    LABELS+=("--label" "org.opencontainers.image.description={{ image_desc }}")
-    LABELS+=("--label" "org.opencontainers.image.title={{ image_name }}")
-    LABELS+=("--label" "org.opencontainers.image.vendor={{ repo_organization }}")
-
-    # This actually builds the image!
-    PODMAN_BUILD_ARGS=("${BUILD_ARGS[@]}" "${LABELS[@]}" --layers --pull=newer --target "${variant}" --tag "${target_image}:${tag}" --file Containerfile)
-
-    podman build "${PODMAN_BUILD_ARGS[@]}" .
-
-build-nvidia $target_image=image_name $tag=nvidia_tag: (build target_image tag "nvidia")
-
-# Group image contents into reusable layers for smaller bootc upgrades.
-rechunk $target_image=image_name $tag=default_tag:
-    #!/usr/bin/env bash
-
-    set -xeuo pipefail
-
-    # You may run into space issues on github runners as we are making a
-    # complete copy of the image, which likely has no shared layers, unless your
-    # base image is also using chunkah
-    CHUNKAH_CONFIG_FILE="$(mktemp)"
-
-    # You may omit the current directory here if you are confident that you
-    # won't run out of space on /tmp for your image
-    CHUNKAH_OUTPUT_DIR="$(mktemp -d ./"${target_image}"_chunkah_XXXXXX)"
-
-    trap 'rm -f "${CHUNKAH_CONFIG_FILE}"; rm -rf "${CHUNKAH_OUTPUT_DIR}"' EXIT
-    podman inspect "${target_image}:${tag}" > "${CHUNKAH_CONFIG_FILE}"
-
-    # Keep the packer and timestamp fixed across releases for layer reuse.
-    podman run --rm \
-      --mount=type=image,src="${target_image}:${tag}",target=/chunkah,rw=true \
-      -v "${PWD}/build_files/rechunk.sh:/rechunk.sh:ro,Z" \
-      -v "${CHUNKAH_CONFIG_FILE}:/chunkah-config.json:ro,Z" \
-      -v "${CHUNKAH_OUTPUT_DIR}:/run/out:Z" \
-      --env SOURCE_DATE_EPOCH=0 \
-      --entrypoint=/bin/bash \
-      quay.io/coreos/chunkah:v0.6.0@sha256:ff8b8b466a942ec6000445d4001fc661e2fc5a952ad9ee29b4de9ab09d1d1708 \
-      /rechunk.sh \
-      build \
-      --verbose \
-      --compressed \
-      --max-layers 128 \
-      --prune /sysroot/ \
-      --label ostree.commit- --label ostree.final-diffid- \
-      --config /chunkah-config.json \
-      --output oci:/run/out/chunked
-
-    CHUNKED_IMAGE="$(podman pull --quiet "oci:${CHUNKAH_OUTPUT_DIR}/chunked")"
-    # Check the final layout before replacing the original image tag.
-    podman run --rm --pull=never --entrypoint=bootc "${CHUNKED_IMAGE}" container lint
-    podman tag "${CHUNKED_IMAGE}" "${target_image}:${tag}"
-
-# Split the image for smaller updates (Classical)!
-ostree-rechunk $target_image=image_name $tag=default_tag:
-    #!/usr/bin/env bash
-
-    set -xeuo pipefail
-
-    # Use the already-built local image to avoid pulling from a remote registry
-    RPM_OSTREE_CHUNKER_IMAGE="localhost/${target_image}:${tag}"
-
-    GRAPHROOT="$(podman info --format '{{ '{{.Store.GraphRoot}}' }}')"
-
-    podman run --rm --pull=never --privileged \
-      --mount=type=image,src="${target_image}:${tag}",target=/rpm-ostree \
-      --mount=type=bind,src=${GRAPHROOT},target=/run/host-container-storage,rw \
-      --mount=type=tmpfs,target=/run/rpm-ostree-storage \
-      --entrypoint /usr/bin/rpm-ostree \
-      "${RPM_OSTREE_CHUNKER_IMAGE}" \
-      compose build-chunked-oci \
-      --max-layers 127 \
-      --format-version=2 \
-      --bootc \
-      --rootfs /rpm-ostree \
-      --output "containers-storage:[overlay@/run/host-container-storage+/run/rpm-ostree-storage]localhost/${target_image}:${tag}"
-
-# Generate Default Tag
-[group('Utility')]
-generate-default-tag $tag=default_tag:
-    #!/usr/bin/env bash
-    set -eoux pipefail
-
-    echo "${tag}"
-
-[group('Utility')]
-generate-nvidia-tag $tag=nvidia_tag:
-    @echo "${tag}"
-
-# Generate Tags
-[group('Utility')]
-generate-build-tags $target_image=image_name $tag=default_tag $variant="standard":
-    #!/usr/bin/env bash
-    set -eoux pipefail
-
-    DATE=$(date +%Y%m%d)
-    DATE_TAG="${DATE}"
-    if [[ "${variant}" == nvidia ]]; then
-        DATE_TAG="${DATE}-nvidia"
-    fi
-    BUILD_TAGS=()
-    if [[ -z "$(git status -s)" ]]; then
-        GIT_SHA=$(git rev-parse --short HEAD)
-        BUILD_TAGS+=("${tag}-${GIT_SHA}")
-        BUILD_TAGS+=("${tag}-${DATE}-${GIT_SHA}")
-        BUILD_TAGS+=("${DATE_TAG}-${GIT_SHA}")
-    fi
-
-    BUILD_TAGS+=("${DATE_TAG}")
-    BUILD_TAGS+=("${tag}")
-    BUILD_TAGS+=("${tag}-${DATE}")
-
-    echo "${BUILD_TAGS[@]}"
-
-# Tag Images
-[group('Utility')]
-tag-images $target_image=image_name $tag=default_tag tags="":
-    #!/usr/bin/env bash
-    set -eoux pipefail
-
-    # Get Image, and untag
-    IMAGE=$(podman inspect ${target_image}:${tag} | jq -r .[].Id)
-    podman untag ${IMAGE}
-
-    # Tag Image
-    for tag in {{ tags }}; do
-        podman tag $IMAGE "${target_image}:${tag}"
-    done
-
-    # Show Images
-    podman images
-
-# Image Name
-[group('Utility')]
 [private]
-image_name $target_image=image_name:
-    #!/usr/bin/env bash
-    set -eoux pipefail
+generate-nvidia-tag:
+    @echo "{{ nvidia_tag }}"
 
-    echo "${image_name}"
-
-# Command: _rootful_load_image
-# Description: This script checks if the current user is root or running under sudo. If not, it attempts to resolve the image tag using podman inspect.
-#              If the image is found, it loads it into rootful podman. If the image is not found, it pulls it from the repository.
-#
-# Parameters:
-#   $target_image - The name of the target image to be loaded or pulled.
-#   $tag - The tag of the target image to be loaded or pulled. Default is 'default_tag'.
-#
-# Example usage:
-#   _rootful_load_image my_image latest
-#
-# Steps:
-# 1. Check if the script is already running as root or under sudo.
-# 2. Check if target image is in the non-root podman container storage)
-# 3. If the image is found, load it into rootful podman using podman scp.
-# 4. If the image is not found, pull it from the remote repository into reootful podman.
-
-_rootful_load_image $target_image=image_name $tag=default_tag:
-    #!/usr/bin/env bash
-    set -eoux pipefail
-
-    # Check if already running as root or under sudo
-    if [[ -n "${SUDO_USER:-}" || "${UID}" -eq "0" ]]; then
-        echo "Already root or running under sudo, no need to load image from user podman."
-        exit 0
-    fi
-
-    # Try to resolve the image tag using podman inspect
-    set +e
-    resolved_tag=$(podman inspect -t image "${target_image}:${tag}" | jq -r '.[].RepoTags.[0]')
-    return_code=$?
-    set -e
-
-    USER_IMG_ID=$(podman images --filter reference="${target_image}:${tag}" --format "'{{ '{{.ID}}' }}'")
-
-    if [[ $return_code -eq 0 ]]; then
-        # If the image is found, load it into rootful podman
-        ID=$(just sudoif podman images --filter reference="${target_image}:${tag}" --format "'{{ '{{.ID}}' }}'")
-        if [[ "$ID" != "$USER_IMG_ID" ]]; then
-            # If the image ID is not found or different from user, copy the image from user podman to root podman
-            COPYTMP=$(mktemp -p "${PWD}" -d -t _build_podman_scp.XXXXXXXXXX)
-            just sudoif TMPDIR=${COPYTMP} podman image scp ${UID}@localhost::"${target_image}:${tag}" root@localhost::"${target_image}:${tag}"
-            rm -rf "${COPYTMP}"
-        fi
-    else
-        # If the image is not found, pull it from the repository
-        just sudoif podman pull "${target_image}:${tag}"
-    fi
-
-# Build an installer ISO using Bootc Image Builder (BIB)
-# Parameters:
-#   target_image: The name of the image to build (ex. localhost/fedora)
-#   tag: The tag of the image to build (ex. latest)
-#   output_dir: The directory for the ISO and build artifacts (default: output)
-
-# Example: just build-iso localhost/fedora latest
-_build-bib $target_image $tag $output_dir="output": (_rootful_load_image target_image tag)
+[private]
+generate-build-tags target_image=image_name tag=default_tag variant="standard":
     #!/usr/bin/env bash
     set -euo pipefail
+    today=$(date -u +%Y%m%d)
+    date_tag=$today
+    [[ "$3" != nvidia ]] || date_tag+=-nvidia
+    revision=$(git rev-parse --short HEAD)
+    printf '%s\n' "$2-$revision $2-$today-$revision $date_tag-$revision $date_tag $2-$today $2"
 
-    BUILDTMP=$(mktemp -p "${PWD}" -d -t _build-bib.XXXXXXXXXX)
+# Remove generated local build output.
+clean:
+    rm -rf -- output _build-* *_chunkah_*
 
-    sudo podman run \
-      --rm \
-      --privileged \
-      --pull=newer \
-      --net=host \
-      --security-opt label=type:unconfined_t \
-      -v "${PWD}/disk_config/iso.toml:/config.toml:ro" \
-      -v "${BUILDTMP}:/output" \
-      -v "/var/lib/containers/storage:/var/lib/containers/storage" \
-      "${bib_image}" \
-      build \
-      --type anaconda-iso \
-      --output /output \
-      --use-librepo=True \
-      --rootfs=btrfs \
-      "${target_image}:${tag}"
-
-    # Replace the ISO file directly so rebuilding can reuse an existing bootiso directory.
-    mkdir -p "${output_dir}/bootiso"
-    sudo mv -f "${BUILDTMP}/bootiso/install.iso" "${output_dir}/bootiso/install.iso"
-    sudo rmdir "${BUILDTMP}/bootiso"
-    sudo mv -f "${BUILDTMP}"/* "${output_dir}/"
-    sudo rmdir "${BUILDTMP}"
-    sudo chown -R "$USER:$USER" "${output_dir}/"
-
-# Podman builds the image from the Containerfile and creates an installer ISO
-# Parameters:
-#   target_image: The name of the image to build (ex. localhost/fedora)
-#   tag: The tag of the image to build (ex. latest)
-#   variant: The container variant to build (default: standard)
-#   output_dir: The directory for the ISO and build artifacts (default: output)
-
-# Example: just rebuild-iso localhost/fedora latest
-_rebuild-bib $target_image $tag $variant="standard" $output_dir="output": (build target_image tag variant) && (_build-bib target_image tag output_dir)
-
-# Build an ISO virtual machine image
-[group('Build Virtal Machine Image')]
-build-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag)
-
-[group('Build Virtal Machine Image')]
-build-iso-nvidia $target_image=("localhost/" + image_name) $tag=nvidia_tag: && (_build-bib target_image tag "output/nvidia")
-
-# Rebuild an ISO virtual machine image
-[group('Build Virtal Machine Image')]
-rebuild-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag)
-
-[group('Build Virtal Machine Image')]
-rebuild-iso-nvidia $target_image=("localhost/" + image_name) $tag=nvidia_tag: && (_rebuild-bib target_image tag "nvidia" "output/nvidia")
-
-# Run a virtual machine from an installer ISO
-_run-vm $target_image $tag:
-    #!/usr/bin/env bash
-    set -eoux pipefail
-
-    image_file="output/bootiso/install.iso"
-
-    # Build the image if it does not exist
-    if [[ ! -f "${image_file}" ]]; then
-        just build-iso "$target_image" "$tag"
-    fi
-
-    # Determine an available port to use
-    port=8006
-    while grep -q :${port} <<< $(ss -tunalp); do
-        port=$(( port + 1 ))
-    done
-    echo "Using Port: ${port}"
-    echo "Connect to http://localhost:${port}"
-
-    # Set up the arguments for running the VM
-    run_args=()
-    run_args+=(--rm --privileged)
-    run_args+=(--pull=newer)
-    run_args+=(--publish "127.0.0.1:${port}:8006")
-    run_args+=(--env "CPU_CORES=4")
-    run_args+=(--env "RAM_SIZE=8G")
-    run_args+=(--env "DISK_SIZE=64G")
-    run_args+=(--env "TPM=Y")
-    run_args+=(--env "GPU=Y")
-    run_args+=(--device=/dev/kvm)
-    run_args+=(--volume "${PWD}/${image_file}:/boot.iso")
-    run_args+=(docker.io/qemux/qemu)
-
-    # Run the VM and open the browser to connect
-    (sleep 30 && xdg-open http://localhost:"$port") &
-    podman run "${run_args[@]}"
-
-# Run a virtual machine from an ISO
-[group('Run Virtal Machine')]
-run-vm-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag)
-
-# Runs shell check on all Bash scripts
+# Check shell helper style; install ShellCheck on your development machine.
 lint:
     #!/usr/bin/env bash
-    set -eoux pipefail
-    # Check if shellcheck is installed
-    if ! command -v shellcheck &> /dev/null; then
-        echo "shellcheck could not be found. Please install it."
-        exit 1
-    fi
-    # Run shellcheck on all Bash scripts
-    find . -iname "*.sh" -type f -exec shellcheck "{}" ';'
+    set -euo pipefail
+    files=$(rg --files -g '*.sh')
+    while IFS= read -r file; do shellcheck "$file"; done <<< "$files"
 
-# Runs shfmt on all Bash scripts
+# Format shell helpers; install shfmt on your development machine.
 format:
     #!/usr/bin/env bash
-    set -eoux pipefail
-    # Check if shfmt is installed
-    if ! command -v shfmt &> /dev/null; then
-        echo "shfmt could not be found. Please install it."
-        exit 1
-    fi
-    # Run shfmt on all Bash scripts
-    find . -iname "*.sh" -type f -exec shfmt --write "{}" ';'
+    set -euo pipefail
+    files=$(rg --files -g '*.sh')
+    while IFS= read -r file; do shfmt --write "$file"; done <<< "$files"

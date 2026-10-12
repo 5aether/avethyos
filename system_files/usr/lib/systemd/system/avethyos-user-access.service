@@ -1,0 +1,11 @@
+[Unit]
+Description=Prepare user access for rootless containers and GameMode
+After=local-fs.target systemd-sysusers.service
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/libexec/avethyos-user-access
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+.git
+.github
+scripts
+README.md
+LICENSE
+**/__pycache__
+**/*.pyc
+*.key
+auth.json

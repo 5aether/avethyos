@@ -1,172 +1,240 @@
 ---
-name: Build container image
+name: Build and verify AvethyOS
+
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
+  merge_group:
   schedule:
     - cron: '0 9 * * *'
       timezone: 'Europe/Rome'
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 env:
-  IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"  # do not edit
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  PUBLISH: ${{ contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && github.ref == 'refs/heads/main' }}
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
-  cancel-in-progress: true
+  # Let releases finish signing and promoting their tags before another starts.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
   build_push:
-    name: Build and push ${{ matrix.variant }} image
+    name: Validate and release ${{ matrix.variant }}
     runs-on: ubuntu-26.04
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         variant: [standard, nvidia]
     env:
       IMAGE_VARIANT: ${{ matrix.variant }}
-
     permissions:
       contents: read
       packages: write
       id-token: write
+      attestations: write
+      artifact-metadata: write
+    defaults:
+      run:
+        shell: bash
 
     steps:
-      # These stage versions are pinned by https://github.com/renovatebot/renovate
-      - name: Checkout
+      - name: Fetch the image sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
+          persist-credentials: false
 
-      - name: Maximize build space
+      - name: Set up the build recipes
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - name: Set up OCI artifact tooling
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+        with:
+          version: '1.3.4'
+
+      - name: Define the variant and release references
+        run: |
+          set -euo pipefail
+          image_name=$(just image_name)
+          if [[ "$IMAGE_VARIANT" == nvidia ]]; then
+            default_tag=$(just generate-nvidia-tag)
+          else
+            default_tag=$(just generate-default-tag)
+          fi
+          image_registry="${IMAGE_REGISTRY,,}"
+          image_name="${image_name,,}"
+          image_version="${default_tag}.$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+          artifacts="${RUNNER_TEMP}/avethyos-${IMAGE_VARIANT}"
+          mkdir -p "$artifacts"
+          {
+            echo "IMAGE_REGISTRY=${image_registry}"
+            echo "IMAGE_NAME=${image_name}"
+            echo "DEFAULT_TAG=${default_tag}"
+            echo "IMAGE_REF=${image_registry}/${image_name}"
+            echo "IMAGE_VERSION=${image_version}"
+            echo "RELEASE_TAG=build-${IMAGE_VARIANT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "IMAGE_ARTIFACTS=${artifacts}"
+            echo "PACKAGE_CACHE=/var/tmp/buildah-cache-$(id -u)"
+          } >> "$GITHUB_ENV"
+
+      - name: Check source syntax and desktop behavior
+        run: |
+          set -euo pipefail
+          bash build_files/ci/check-sources.sh 2>&1 | tee "$IMAGE_ARTIFACTS/source-checks.log"
+
+      - name: Recover space for image assembly
         uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
 
-      - name: Install just
-        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 #v4.0.0
-
-      - name: Check Just Syntax
-        shell: bash
+      - name: Resolve and inspect the upstream inputs
+        id: upstream
         run: |
-          just check
+          set -euo pipefail
+          # The configuration file is versioned shell-compatible build data.
+          source image-template.env
+          skopeo inspect --retry-times=3 --override-os=linux --override-arch=amd64 \
+            "docker://${BASE_IMAGE}" > "$IMAGE_ARTIFACTS/base-image.json"
+          jq -e '.Os == "linux" and .Architecture == "amd64"' "$IMAGE_ARTIFACTS/base-image.json"
+          base_ref=$(jq -er '.Name + "@" + .Digest' "$IMAGE_ARTIFACTS/base-image.json")
+          kernel_ref=$(oras resolve --full-reference "$OGC_KERNEL_REF")
+          [[ "$base_ref" =~ @sha256:[a-f0-9]{64}$ ]]
+          [[ "$kernel_ref" =~ @sha256:[a-f0-9]{64}$ ]]
+          podman pull "$base_ref"
+          fedora_version=$(podman run --rm --pull=never --network=none \
+            --entrypoint /bin/bash "$base_ref" \
+            -euo pipefail -c 'source /usr/lib/os-release; [[ "$ID" == fedora ]]; echo "${VERSION_ID:?}"')
+          [[ "$fedora_version" =~ ^[0-9]+$ ]]
+          {
+            echo "BASE_IMAGE_REF=${base_ref}"
+            echo "OGC_KERNEL_DIGEST_REF=${kernel_ref}"
+            echo "FEDORA_VERSION=${fedora_version}"
+            echo "PACKAGE_CACHE_PREFIX=${RUNNER_OS}-${RUNNER_ARCH}-avethyos-dnf-v1-f${fedora_version}-${IMAGE_VARIANT}"
+          } >> "$GITHUB_ENV"
+          jq -n --arg base "$base_ref" --arg kernel "$kernel_ref" \
+            --arg fedora "$fedora_version" --arg revision "$GITHUB_SHA" \
+            '{base: $base, kernel: $kernel, fedora: $fedora, revision: $revision}' \
+            > "$IMAGE_ARTIFACTS/build-inputs.json"
 
-      - name: Check desktop installation and user migration
-        run: python3 -m unittest discover -s tests -v
+      - name: Restore reusable RPM downloads
+        id: package_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.PACKAGE_CACHE }}
+          key: ${{ env.PACKAGE_CACHE_PREFIX }}-${{ hashFiles('Containerfile', 'build_files/**/*.sh', 'build_files/dnf-cache.conf') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ env.PACKAGE_CACHE_PREFIX }}-${{ hashFiles('Containerfile', 'build_files/**/*.sh', 'build_files/dnf-cache.conf') }}-
+            ${{ env.PACKAGE_CACHE_PREFIX }}-
 
-      - name: Image Name
-        id: image-name
+      - name: Verify runner tools and storage capacity
         run: |
-          IMAGE_NAME=$(just image_name)
-
-          echo "IMAGE_NAME=${IMAGE_NAME}" >> $GITHUB_ENV
-
-      - name: Default Tag
-        id: gen-default-tag
-        run: |
-          if [[ "$IMAGE_VARIANT" == nvidia ]]; then
-            DEFAULT_TAG=$(just generate-nvidia-tag)
-          else
-            DEFAULT_TAG=$(just generate-default-tag)
+          set -euo pipefail
+          for tool in podman skopeo jq node python3 just oras; do
+            command -v "$tool"
+          done
+          podman info --format=json > "$IMAGE_ARTIFACTS/runner-info.json"
+          graphroot=$(jq -er '.store.graphRoot' "$IMAGE_ARTIFACTS/runner-info.json")
+          df -h "$graphroot" "$RUNNER_TEMP"
+          available_bytes=$(df -PB1 "$graphroot" | awk 'NR == 2 { print $4 }')
+          if (( available_bytes < 35 * 1024 * 1024 * 1024 )); then
+            echo '::error::Image assembly and rechunking require at least 35 GiB of free storage.'
+            exit 1
           fi
 
-          echo "DEFAULT_TAG=${DEFAULT_TAG}" >> $GITHUB_ENV
+      - name: Set up release signing
+        if: env.PUBLISH == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.2'
 
-      - name: Prepare environment
-        run: |
-          # Lowercase the image uri https://github.com/macbre/push-to-ghcr/issues/12
-          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> ${GITHUB_ENV}
-          echo "IMAGE_NAME=${IMAGE_NAME,,}" >> ${GITHUB_ENV}
-
-      # This actually builds the container image
-      - name: Build Image
-        id: build-image
-        run: |
-          just build \
-            ${IMAGE_NAME} \
-            ${DEFAULT_TAG} \
-            ${IMAGE_VARIANT}
-
-      - name: Check installed desktop
-        run: |
-          podman run --rm --pull=never --network=none \
-            --volume "${PWD}/build_files/check-desktop.sh:/check-desktop.sh:ro" \
-            --entrypoint /bin/bash \
-            "${IMAGE_NAME}:${DEFAULT_TAG}" /check-desktop.sh
-
-      - name: Rechunk image for smaller updates
-        run: |
-          just rechunk "${IMAGE_NAME}" "${DEFAULT_TAG}"
-
-      - name: Generate Build Tags
-        id: gen-build-tags
-        run: |
-          alias_tags="$(just generate-build-tags \
-                        ${IMAGE_NAME} \
-                        ${DEFAULT_TAG} \
-                        ${IMAGE_VARIANT})"
-
-          echo "Tags for this Action..."
-          echo "${alias_tags}"
-          echo "alias_tags=${alias_tags}" >> $GITHUB_OUTPUT
-
-      - name: Tag Image
-        id: tag-images
+      - name: Check the release key against our public key
+        if: env.PUBLISH == 'true'
         env:
-          ALIAS_TAGS: ${{ steps.gen-build-tags.outputs.alias_tags }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
         run: |
-          just tag-images \
-            "${IMAGE_NAME}" \
-            "${DEFAULT_TAG}" \
-            "${ALIAS_TAGS}"
+          set -euo pipefail
+          if [[ -z "$COSIGN_PRIVATE_KEY" ]]; then
+            echo '::error::The SIGNING_SECRET repository secret is required to release images.'
+            exit 1
+          fi
+          cosign public-key --key env://COSIGN_PRIVATE_KEY > "$RUNNER_TEMP/release-${IMAGE_VARIANT}.pub"
+          if ! cmp -s cosign.pub "$RUNNER_TEMP/release-${IMAGE_VARIANT}.pub"; then
+            echo '::error::SIGNING_SECRET does not match the repository cosign.pub.'
+            exit 1
+          fi
 
-      # These `if` statements are so that pull requests for your custom images do not make it publish any packages under your name without you knowing
-      # They also check if the runner is on the default branch so that things like the merge queue (if you enable it), are going to work
-      - name: Login to GitHub Container Registry
+      - name: Assemble the selected desktop image
+        id: build
+        env:
+          # Buildah stores cache mounts under TMPDIR/buildah-cache-<uid>.
+          TMPDIR: /var/tmp
+        run: just build "$IMAGE_NAME" "$DEFAULT_TAG" "$IMAGE_VARIANT"
+
+      - name: Arrange reusable layers for system updates
+        id: rechunk
+        run: just rechunk "$IMAGE_NAME" "$DEFAULT_TAG"
+
+      - name: Validate the final system and desktop integration
+        id: image_checks
+        run: just check-image "$IMAGE_NAME" "$DEFAULT_TAG" "$IMAGE_VARIANT"
+
+      - name: Preserve RPM downloads from a validated release build
+        if: env.PUBLISH == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.PACKAGE_CACHE }}
+          key: ${{ steps.package_cache.outputs.cache-primary-key }}
+
+      - name: Set up software inventory generation
+        id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: 'v1.44.0'
+
+      - name: Inventory the final image and validate the SBOM
+        id: sbom
+        env:
+          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
+        run: bash build_files/ci/generate-sbom.sh "$IMAGE_NAME:$DEFAULT_TAG"
+
+      - name: Authenticate for registry publication
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push To GHCR
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        id: push-image
-        env:
-          ALIAS_TAGS: ${{ steps.gen-build-tags.outputs.alias_tags }}
+      - name: Upload the candidate and record its exact digest
+        if: env.PUBLISH == 'true'
+        id: publish
         run: |
           set -euo pipefail
-          image_ref="${IMAGE_REGISTRY}/${IMAGE_NAME}"
-          previous_manifest="${RUNNER_TEMP}/previous-${IMAGE_VARIANT}.manifest.json"
+          previous_manifest="$IMAGE_ARTIFACTS/previous.manifest.json"
           previous_available=false
           if skopeo inspect --raw --retry-times=3 \
-            "docker://${image_ref}:${DEFAULT_TAG}" > "$previous_manifest"; then
+            "docker://${IMAGE_REF}:${DEFAULT_TAG}" > "$previous_manifest"; then
             previous_available=true
           else
-            echo 'Previous image manifest unavailable; update size cannot be estimated.'
             printf '{"layers":[]}\n' > "$previous_manifest"
           fi
-
-          podman push --format=oci --compression-format=zstd --compression-level=19 \
-            --force-compression --digestfile=/tmp/digestfile \
-            "${IMAGE_NAME}:${DEFAULT_TAG}" "${image_ref}:${DEFAULT_TAG}"
-          for tag in ${ALIAS_TAGS}; do
-            if [[ "$tag" != "$DEFAULT_TAG" ]]; then
-              skopeo copy --preserve-digests --retry-times=3 \
-                "docker://${image_ref}:${DEFAULT_TAG}" "docker://${image_ref}:${tag}"
-            fi
-          done
-
-          digest=$(< /tmp/digestfile)
-          echo "digest=${digest}" >> $GITHUB_OUTPUT
-          current_manifest="${RUNNER_TEMP}/current-${IMAGE_VARIANT}.manifest.json"
-          skopeo inspect --raw --retry-times=3 "docker://${image_ref}@${digest}" > "$current_manifest"
+          podman push --retry=3 --format=oci --compression-format=zstd --compression-level=19 \
+            --force-compression --digestfile="$IMAGE_ARTIFACTS/image.digest" \
+            "${IMAGE_NAME}:${DEFAULT_TAG}" "${IMAGE_REF}:${RELEASE_TAG}"
+          digest=$(< "$IMAGE_ARTIFACTS/image.digest")
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          current_manifest="$IMAGE_ARTIFACTS/current.manifest.json"
+          skopeo inspect --raw --retry-times=3 "docker://${IMAGE_REF}@${digest}" > "$current_manifest"
           download_bytes=$(jq '[.layers[].size] | add // 0' "$current_manifest")
           download_size=$(numfmt --to=iec-i --suffix=B "$download_bytes")
-          echo "${IMAGE_VARIANT}: ${download_size} of compressed image layers" >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE_VARIANT}: ${download_size} of compressed image layers." >> "$GITHUB_STEP_SUMMARY"
           if [[ "$previous_available" == true ]]; then
             update_stats=$(jq -r --slurpfile previous "$previous_manifest" '
               ($previous[0].layers | map(.digest)) as $old_layers
@@ -181,43 +249,107 @@ jobs:
             echo 'Estimated update size unavailable: no previous image manifest.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # This section is optional and only needs to be enabled if you plan on distributing
-      # your project for others to consume. You will need to create a public and private key
-      # using Cosign and save the private key as a repository secret in Github for this workflow
-      # to consume. For more details, review the image signing section of the README.
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        with:
-          # be careful when upgrading major versions
-          cosign-release: 'v3.1.2'
-
-      - name: Sign container image
-        id: sign-image
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      - name: Sign the image and its attached software inventory
+        if: env.PUBLISH == 'true'
+        id: sbom_publish
         env:
-          COSIGN_EXPERIMENTAL: false
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
-          DIGEST: ${{ steps.push-image.outputs.digest }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
         run: |
-          # https://github.com/containers/container-libs/issues/388
-          # https://github.com/coreos/rpm-ostree/issues/5509
-          # use old bundle format, so we can use newer cosign 3.X.X instead of 2.X.X
-          cosign sign -y --new-bundle-format=false --use-signing-config=false --key env://COSIGN_PRIVATE_KEY ${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}
+          set -euo pipefail
+          # Keep the signature format consumed by bootc/containers-image.
+          cosign sign -y --new-bundle-format=false --use-signing-config=false \
+            --key env://COSIGN_PRIVATE_KEY "${IMAGE_REF}@${DIGEST}"
+          cd "$IMAGE_ARTIFACTS"
+          oras attach --format=json --artifact-type=application/vnd.spdx+json \
+            "${IMAGE_REF}@${DIGEST}" 'sbom.spdx.json:application/vnd.spdx+json' \
+            > sbom-descriptor.json
+          sbom_digest=$(jq -er '.digest' sbom-descriptor.json)
+          [[ "$sbom_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=${sbom_digest}" >> "$GITHUB_OUTPUT"
+          cosign sign -y --new-bundle-format=false --use-signing-config=false \
+            --key env://COSIGN_PRIVATE_KEY "${IMAGE_REF}@${sbom_digest}"
 
-  notify_personal_images:
-    name: Notify private personal-image builders
-    needs: build_push
-    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read
-    env:
-      PERSONAL_IMAGE_REPOS: ${{ secrets.PERSONAL_IMAGE_REPOS }}
-      PERSONAL_IMAGE_DISPATCH_TOKEN: ${{ secrets.PERSONAL_IMAGE_DISPATCH_TOKEN }}
-    steps:
-      - name: Checkout notification helper
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Trigger configured private builders after publication
-        run: python3 build_files/notify-personal-images.py
+      - name: Record verifiable build provenance
+        if: env.PUBLISH == 'true'
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_REF }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
 
+      - name: Verify signatures, inventory linkage, and provenance
+        if: env.PUBLISH == 'true'
+        id: verify
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          SBOM_DIGEST: ${{ steps.sbom_publish.outputs.digest }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cosign verify --key cosign.pub "${IMAGE_REF}@${DIGEST}" > "$IMAGE_ARTIFACTS/image-signature.json"
+          cosign verify --key cosign.pub "${IMAGE_REF}@${SBOM_DIGEST}" > "$IMAGE_ARTIFACTS/sbom-signature.json"
+          sbom_file_digest="sha256:$(sha256sum "$IMAGE_ARTIFACTS/sbom.spdx.json" | cut -d ' ' -f1)"
+          oras manifest fetch "${IMAGE_REF}@${SBOM_DIGEST}" > "$IMAGE_ARTIFACTS/sbom.manifest.json"
+          jq -e --arg image "$DIGEST" --arg file "$sbom_file_digest" '
+            .subject.digest == $image
+            and .artifactType == "application/vnd.spdx+json"
+            and any(.layers[]; .digest == $file and .mediaType == "application/vnd.spdx+json")
+          ' "$IMAGE_ARTIFACTS/sbom.manifest.json"
+          cp "$PROVENANCE_BUNDLE" "$IMAGE_ARTIFACTS/provenance.sigstore.json"
+          gh attestation verify "oci://${IMAGE_REF}@${DIGEST}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build.yml" \
+            --source-digest "$GITHUB_SHA" --bundle "$PROVENANCE_BUNDLE" \
+            --format json > "$IMAGE_ARTIFACTS/provenance-verification.json"
+
+      - name: Promote the verified digest to update tags
+        if: env.PUBLISH == 'true'
+        id: promote
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          alias_tags=$(just generate-build-tags "$IMAGE_NAME" "$DEFAULT_TAG" "$IMAGE_VARIANT")
+          # Update the moving system tag last; every alias copies the signed digest.
+          for tag in ${alias_tags}; do
+            if [[ "$tag" != "$DEFAULT_TAG" ]]; then
+              skopeo copy --preserve-digests --retry-times=3 \
+                "docker://${IMAGE_REF}@${DIGEST}" "docker://${IMAGE_REF}:${tag}"
+              actual_digest=$(skopeo inspect --retry-times=3 --format '{{.Digest}}' "docker://${IMAGE_REF}:${tag}")
+              [[ "$actual_digest" == "$DIGEST" ]]
+            fi
+          done
+          skopeo copy --preserve-digests --retry-times=3 \
+            "docker://${IMAGE_REF}@${DIGEST}" "docker://${IMAGE_REF}:${DEFAULT_TAG}"
+          actual_digest=$(skopeo inspect --retry-times=3 --format '{{.Digest}}' "docker://${IMAGE_REF}:${DEFAULT_TAG}")
+          [[ "$actual_digest" == "$DIGEST" ]]
+          printf 'Released %s:%s at %s.\n' "$IMAGE_REF" "$DEFAULT_TAG" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain validation logs and software inventories
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: avethyos-${{ matrix.variant }}-validation
+          path: ${{ runner.temp }}/avethyos-${{ matrix.variant }}/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Report the outcome and remaining runner space
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          ASSEMBLY_STATUS: ${{ steps.build.outcome }}
+          IMAGE_STATUS: ${{ steps.image_checks.outcome }}
+          INVENTORY_STATUS: ${{ steps.sbom.outcome }}
+          RELEASE_STATUS: ${{ steps.promote.outcome }}
+        run: |
+          {
+            printf '\nAvethyOS %s: %s.\n\n' "$IMAGE_VARIANT" "$JOB_STATUS"
+            printf '| Image assembly | Final image checks | SBOM | Release |\n'
+            printf '| --- | --- | --- | --- |\n'
+            printf '| %s | %s | %s | %s |\n' "$ASSEMBLY_STATUS" "$IMAGE_STATUS" "$INVENTORY_STATUS" "$RELEASE_STATUS"
+          } >> "$GITHUB_STEP_SUMMARY"
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"

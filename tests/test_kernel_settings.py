@@ -2,6 +2,7 @@
 
 import importlib.machinery
 import importlib.util
+import argparse
 import json
 from pathlib import Path
 import subprocess
@@ -10,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'system_files/usr/bin/avethyos'
+SCRIPT = Path(__file__).resolve().parents[1] / 'system_files/usr/lib/avethyos/kernel.py'
 loader = importlib.machinery.SourceFileLoader('kernel_settings', str(SCRIPT))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 settings = importlib.util.module_from_spec(spec)
@@ -94,10 +95,10 @@ class KernelSettingsTests(unittest.TestCase):
 
     def test_fnmode_uses_module_qualified_argument_and_default_removes_it(self):
         with patch.object(settings.os, 'geteuid', return_value=0), patch.object(settings, 'stage') as stage:
-            self.assertEqual(settings.main(['fnmode', '2']), 0)
+            settings.handle(argparse.Namespace(command='fnmode', mode='2'))
             stage.assert_called_once_with('set', ['hid_apple.fnmode=2'])
             stage.reset_mock()
-            self.assertEqual(settings.main(['fnmode', 'default']), 0)
+            settings.handle(argparse.Namespace(command='fnmode', mode='default'))
             stage.assert_called_once_with('remove', ['hid_apple.fnmode'])
 
     def test_invalid_saved_arguments_are_rejected(self):

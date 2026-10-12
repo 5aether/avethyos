@@ -4,6 +4,8 @@ hl.env("HYPRCURSOR_SIZE", "24")
 hl.env("XDG_CURRENT_DESKTOP", "Hyprland")
 hl.env("XDG_SESSION_DESKTOP", "Hyprland")
 hl.env("XDG_SESSION_TYPE", "wayland")
+-- GE-Proton 11+ supplies its own Windows named-pipe RPC bridge.
+hl.env("PROTON_DISCORD_BRIDGE", os.getenv("PROTON_DISCORD_BRIDGE") or "1")
 
 local home = assert(os.getenv("HOME"))
 local config_home = os.getenv("XDG_CONFIG_HOME")
@@ -20,6 +22,14 @@ hl.env("XDG_DATA_DIRS", data_dirs)
 local runtime_dir = os.getenv("XDG_RUNTIME_DIR")
 if runtime_dir and runtime_dir ~= "" then
     hl.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=" .. runtime_dir .. "/bus")
+    -- Steam's supported container settings also expose the stable RPC proxies.
+    local rpc_dir = runtime_dir .. "/discord-rpc"
+    hl.env("BRIDGE_RPC_PATH", rpc_dir)
+    local shared = os.getenv("PRESSURE_VESSEL_FILESYSTEMS_RO") or ""
+    if not (":" .. shared .. ":"):find(":" .. rpc_dir .. ":", 1, true) then
+        shared = shared == "" and rpc_dir or shared .. ":" .. rpc_dir
+    end
+    hl.env("PRESSURE_VESSEL_FILESYSTEMS_RO", shared)
 end
 
 local function shell_quote(value)

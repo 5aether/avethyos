@@ -1,0 +1,61 @@
+#!/usr/bin/python3
+"""Prepare local desktop accounts before login, preserving existing mappings."""
+
+import grp
+from pathlib import Path
+import subprocess
+
+
+def login_settings(path):
+    settings = {}
+    for line in path.read_text().splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) == 2 and fields[1].isdigit():
+            settings[fields[0]] = int(fields[1])
+    return settings
+
+
+def mappings(path):
+    result = []
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        owner, start, count = line.split(":")
+        result.append((owner, int(start), int(count)))
+    return result
+
+
+def prepare(etc=Path("/etc"), run=subprocess.run):
+    settings = login_settings(etc / "login.defs")
+    for kind in ("uid", "gid"):
+        path = etc / f"sub{kind}"
+        if not path.exists():
+            path.touch(mode=0o644)
+    ranges = {kind: mappings(etc / f"sub{kind.lower()}") for kind in ("UID", "GID")}
+    minimum, maximum = settings.get("UID_MIN", 1000), settings.get("UID_MAX", 60000)
+    gaming = grp.getgrnam("gamemode")
+    for line in (etc / "passwd").read_text().splitlines():
+        name, _, uid, gid, _, _, shell = line.split(":")
+        uid = int(uid)
+        if not minimum <= uid <= maximum or shell.endswith(("/nologin", "/false")):
+            continue
+        arguments = ["usermod"]
+        for kind in ("UID", "GID"):
+            current = ranges[kind]
+            if any(owner in (name, str(uid)) and count > 0 for owner, _, count in current):
+                continue
+            start = max([settings.get(f"SUB_{kind}_MIN", 524288), maximum + 1,
+                         *(start + count for _, start, count in current)])
+            count = settings.get(f"SUB_{kind}_COUNT", 65536)
+            if count <= 0 or start + count - 1 > settings.get(f"SUB_{kind}_MAX", 600100000):
+                raise ValueError(f"No subordinate {kind} range available for {name}")
+            arguments.extend([f"--add-sub{kind.lower()}s", f"{start}-{start + count - 1}"])
+            current.append((name, start, count))
+        if name not in gaming.gr_mem and int(gid) != gaming.gr_gid:
+            arguments.extend(["--append", "--groups", "gamemode"])
+        if len(arguments) > 1:
+            run([*arguments, name], check=True)
+
+
+if __name__ == "__main__":
+    prepare()

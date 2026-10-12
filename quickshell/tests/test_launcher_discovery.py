@@ -165,6 +165,31 @@ ShellRoot {
                     app.write_text(app.read_text().replace("Name=New Install", "Name=Updated Install"))
                     wait_for(lambda value: any(entry["id"] == "test-new-install" and entry["name"] == "Updated Install"
                                               for entry in value.get("apps", [])), "updated application metadata was missed")
+                    # Distrobox exports use this same user applications directory.
+                    # Execute its generated command shape through a controlled
+                    # container entry point to verify arguments reach the box.
+                    box_command = base / "distrobox-enter"
+                    box_marker = base / "distrobox-launched"
+                    box_command.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
+                                           f"Path({str(box_marker)!r}).write_text(repr(sys.argv[1:]))\n")
+                    box_command.chmod(0o755)
+                    box_export = user / "devbox-code.desktop"
+                    box_export.write_text("[Desktop Entry]\nType=Application\nName=Code (on devbox)\n"
+                                          f'Exec="{box_command}" -n devbox -- /usr/bin/code %F\n'
+                                          "StartupWMClass=Code\n")
+                    box_state = wait_for(lambda value: contains(value, "devbox-code"),
+                                         "Distrobox application export was missed")
+                    self.assertEqual(initial["pid"], box_state["pid"])
+                    call("search", "devbox")
+                    wait_for(lambda value: contains(value, "devbox-code") and len(value["apps"]) == 1,
+                             "Distrobox application metadata was not searchable")
+                    call("launch", "devbox-code")
+                    wait_for(lambda value: box_marker.exists(), "Distrobox exported application did not launch")
+                    self.assertEqual("['-n', 'devbox', '--', '/usr/bin/code']", box_marker.read_text())
+                    box_export.unlink()
+                    wait_for(lambda value: not contains(value, "devbox-code"),
+                             "removed Distrobox export remained in the launcher")
+                    call("search", "")
                     exports = home / ".local/share/flatpak/exports/share/applications"
                     exports.mkdir(parents=True)
                     first, second = home / "flatpak-first", home / "flatpak-second"

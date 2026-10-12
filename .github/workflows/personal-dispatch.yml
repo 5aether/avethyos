@@ -1,0 +1,41 @@
+---
+name: Notify personal AvethyOS images
+
+on:
+  workflow_run:
+    workflows: [Build and verify AvethyOS]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    # This event fires after the full matrix and the release workflow conclude.
+    # A PR, fork, failed build or validation-only run must never trigger release.
+    if: >-
+      github.repository == '5aether/avethyos' &&
+      github.event.workflow_run.head_repository.full_name == '5aether/avethyos' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.path == '.github/workflows/build.yml' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Fetch the trusted released notification helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Notify opted-in personal repositories
+        # One destination failure never changes the published main release.
+        continue-on-error: true
+        env:
+          PERSONAL_IMAGE_REPOS: ${{ vars.PERSONAL_IMAGE_REPOS }}
+          PERSONAL_IMAGE_DISPATCH_TOKEN: ${{ secrets.PERSONAL_IMAGE_DISPATCH_TOKEN }}
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+          UPSTREAM_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: python3 -B build_files/ci/dispatch-personal-images.py

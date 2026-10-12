@@ -384,7 +384,7 @@ that calls the workflow-dispatch API. [GitHub scheduling behavior](https://docs.
 | `tests/` | Isolated system-helper and workflow tests. |
 | `.github/workflows/` | Image releases, installer creation, and personal notifications. |
 
-Local image work needs Podman, Skopeo, Just, jq, and ripgrep:
+Local image work needs Podman, Skopeo, Just, and jq:
 
 ```bash
 just build

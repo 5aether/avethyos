@@ -1,0 +1,44 @@
+#!/bin/bash
+set -euo pipefail
+
+# Build-time only: never erase state on an installed operating system.
+if [[ -e /run/ostree-booted || ! -e /run/.containerenv ]]; then
+    printf 'Image cleanup requires an unbooted build container.\n' >&2
+    exit 1
+fi
+for directory in /tmp /var/cache /var/log /var/tmp; do
+    if mountpoint -q -- "$directory"; then
+        printf 'Run image cleanup without cache or tmpfs mounts: %s\n' "$directory" >&2
+        exit 1
+    fi
+done
+
+# Authselect uses this mutable checksum to detect profile updates. Seed it on
+# first boot through tmpfiles, while retaining any existing machine's copy.
+if [[ -f /var/lib/authselect/checksum ]]; then
+    install -Dm0644 /var/lib/authselect/checksum \
+        /usr/share/factory/var/lib/authselect/checksum
+    rm -f /var/lib/authselect/checksum
+fi
+
+# Runtime files are masked by tmpfs at boot. Visit children first, and retain
+# container-injected mounts (including DNS, secrets and .containerenv).
+while IFS= read -r -d '' path; do
+    if mountpoint -q -- "$path"; then
+        continue
+    fi
+    if [[ -d $path && ! -L $path ]]; then
+        rmdir --ignore-fail-on-non-empty -- "$path"
+    else
+        rm -f -- "$path"
+    fi
+done < <(find /run /tmp -xdev -depth -mindepth 1 -print0)
+
+# These are build downloads, timestamps and logs, never initial machine state.
+# Run without cache mounts, so inherited files are removed from the image too.
+for directory in /var/cache /var/log /var/tmp; do
+    if [[ -d $directory ]]; then
+        find "$directory" -xdev -depth -mindepth 1 -delete
+    fi
+done
+rm -rf /var/lib/dnf/repos

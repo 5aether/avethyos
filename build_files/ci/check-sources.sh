@@ -12,7 +12,7 @@ from pathlib import Path
 import subprocess
 
 count = 0
-for root in (Path("build_files"), Path("system_files"), Path("quickshell"), Path("personal")):
+for root in (Path("build_files"), Path("system_files"), Path("quickshell")):
     for path in sorted(root.rglob("*")):
         if not path.is_file() or any(part in (".git", "__pycache__") for part in path.parts):
             continue

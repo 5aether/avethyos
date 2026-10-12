@@ -4,7 +4,6 @@ FROM scratch AS ctx
 COPY build_files /
 COPY system_files /system_files
 COPY README.md LICENSE /docs/
-COPY personal/README.md /docs/personal.md
 
 FROM scratch AS desktop
 COPY hypr /hypr
@@ -181,7 +180,7 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
     --mount=type=tmpfs,dst=/tmp \
     bash /ctx/post-install.sh
 
-RUN bootc container lint
+RUN /usr/libexec/avethyos-image-cleanup && bootc container lint --fatal-warnings
 
 FROM common AS standard
 
@@ -192,4 +191,4 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
     --mount=type=tmpfs,dst=/tmp \
     bash /ctx/post-install.sh
 
-RUN bootc container lint
+RUN /usr/libexec/avethyos-image-cleanup && bootc container lint --fatal-warnings

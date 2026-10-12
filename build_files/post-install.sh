@@ -27,8 +27,8 @@ done
 # Keep them for later builds rather than erasing the runner's package cache.
 
 install -Dm644 /ctx/docs/README.md /usr/share/doc/avethyos/README.md
-install -Dm644 /ctx/docs/personal.md /usr/share/doc/avethyos/personal/README.md
 install -Dm644 /ctx/docs/LICENSE /usr/share/doc/avethyos/LICENSE
+chmod 0755 /usr/libexec/avethyos-image-cleanup
 
 # Apply branding after package installs so the initramfs includes AvethyOS names.
 bash /ctx/layers/branding.sh

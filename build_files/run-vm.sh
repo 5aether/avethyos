@@ -7,7 +7,7 @@ if [[ ! -f "$iso" ]]; then
     bash build_files/build-iso.sh "$image" "$tag" output
 fi
 port=8006
-while ss -tlnH "sport = :${port}" | rg -q .; do
+while [[ -n "$(ss -tlnH "sport = :${port}")" ]]; do
     ((port+=1))
 done
 printf 'VM screen: http://localhost:%s\n' "$port"

@@ -18,7 +18,7 @@ default:
 check:
     #!/usr/bin/env bash
     set -euo pipefail
-    files=$(find . -type f \( -name '*.just' -o -name Justfile \) -not -path './.git/*' -not -path './personal/*')
+    files=$(find . -type f \( -name '*.just' -o -name Justfile \) -not -path './.git/*')
     while IFS= read -r file; do
         just --unstable --fmt --check --justfile "$file"
     done <<< "$files"
@@ -27,7 +27,7 @@ check:
 fix:
     #!/usr/bin/env bash
     set -euo pipefail
-    files=$(find . -type f \( -name '*.just' -o -name Justfile \) -not -path './.git/*' -not -path './personal/*')
+    files=$(find . -type f \( -name '*.just' -o -name Justfile \) -not -path './.git/*')
     while IFS= read -r file; do
         just --unstable --fmt --justfile "$file"
     done <<< "$files"
@@ -97,12 +97,12 @@ clean:
 lint:
     #!/usr/bin/env bash
     set -euo pipefail
-    files=$(find build_files system_files quickshell personal -type f -name '*.sh')
+    files=$(find build_files system_files quickshell -type f -name '*.sh')
     while IFS= read -r file; do shellcheck "$file"; done <<< "$files"
 
 # Format shell helpers; install shfmt on your development machine.
 format:
     #!/usr/bin/env bash
     set -euo pipefail
-    files=$(find build_files system_files quickshell personal -type f -name '*.sh')
+    files=$(find build_files system_files quickshell -type f -name '*.sh')
     while IFS= read -r file; do shfmt --write "$file"; done <<< "$files"

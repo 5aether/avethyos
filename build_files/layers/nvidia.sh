@@ -16,8 +16,12 @@ for kernel_rpm in "$kernel_devel_rpm" "$kernel_devel_matched_rpm"; do
     fi
 done
 
+# Select RPM Fusion's bundled open modules before its package or akmods runs.
+install -d /etc/rpm
+printf '%%_with_kmod_nvidia_open 1\n' > /etc/rpm/macros.nvidia-kmod
+
 dnf5 install -y --setopt=install_weak_deps=False \
-    akmod-nvidia-open \
+    akmod-nvidia \
     xorg-x11-drv-nvidia-cuda \
     vulkan \
     xorg-x11-drv-nvidia-cuda-libs \
@@ -45,6 +49,20 @@ dnf5 versionlock add kernel-devel kernel-devel-matched
 
 akmods --force --kernels "$kernel_version"
 depmod -a "$kernel_version"
+driver_version=$(rpm -q xorg-x11-drv-nvidia --queryformat '%{VERSION}')
+for module in nvidia nvidia_modeset nvidia_uvm nvidia_drm; do
+    vermagic=$(modinfo -k "$kernel_version" -F vermagic "$module")
+    if [[ "${vermagic%% *}" != "$kernel_version" ||
+          "$(modinfo -k "$kernel_version" -F version "$module")" != "$driver_version" ]]; then
+        printf 'NVIDIA module %s does not match driver %s and kernel %s.\n' \
+            "$module" "$driver_version" "$kernel_version" >&2
+        exit 1
+    fi
+done
+if [[ "$(modinfo -k "$kernel_version" -F license nvidia)" != 'Dual MIT/GPL' ]]; then
+    echo 'The NVIDIA build did not select the open kernel module.' >&2
+    exit 1
+fi
 
 # Kernel modules are built into the image; runtime builds cannot modify /usr.
 # Build-time signing keys are ephemeral, so runtime key generation is unnecessary.

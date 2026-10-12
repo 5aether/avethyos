@@ -303,9 +303,10 @@ with `sudo avethyos kernel apply`. [Bootc argument sources](https://bootc.dev/bo
 
 ## Your own AvethyOS image
 
-The **personal** branch is a small template that starts from a successfully
-published AvethyOS image. It contains your changes and its own workflow, so you
-can keep it in a public or private GitHub repository.
+The separate [avethyos-personal repository](https://github.com/5aether/avethyos-personal)
+is a small template that starts from a successfully published AvethyOS image.
+Fork or copy it to keep your changes and its build workflow in a public or private
+GitHub repository. You do not need the main operating system sources.
 
 Choose exactly one version in `image.conf`:
 
@@ -321,10 +322,10 @@ Add Fedora package names to `packages.txt`, one per line. Change image-wide kern
 arguments in `kernel-arguments.toml`. Put additional system files under `files/`,
 following their destination paths. Every configuration file includes examples.
 
-Follow the [personal-image guide](personal/README.md) to copy or fork the template,
-enable Actions, and use your image. Forks retain the workflows, but the personal
-branch must be their default branch. The personal workflow has a repository guard
-and cannot build in `5aether/avethyos`.
+Follow the [personal-image guide](https://github.com/5aether/avethyos-personal#readme)
+to fork or clone the template, enable Actions, and use your image. Your default
+branch publishes your image. The official template checks its files but never
+publishes a personal image in either official repository.
 
 For a private registry, save a GitHub token with `read:packages` on the PC:
 
@@ -380,8 +381,7 @@ that calls the workflow-dispatch API. [GitHub scheduling behavior](https://docs.
 | `system_files/` | Files installed into the OS, including the modular CLI. |
 | `hypr/` | Managed Hyprland integration and commented user defaults. |
 | `quickshell/` | Desktop code, helpers, assets, and desktop tests. |
-| `personal/` | Source of the standalone personal-branch template. |
-| `tests/` | Isolated system-helper and workflow tests. |
+| `tests/` | Isolated system-helper and release-notification tests. |
 | `.github/workflows/` | Image releases, installer creation, and personal notifications. |
 
 Local image work needs Podman, Skopeo, Just, and jq:

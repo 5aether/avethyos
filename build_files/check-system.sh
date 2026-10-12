@@ -29,8 +29,8 @@ command -v Hyprland qs sddm fastfetch gamescope gamemoderun mangoapp mangohud \
 test -s /usr/share/dbus-1/services/com.feralinteractive.GameMode.service
 getent group gamemode
 [[ "$(systemctl --root=/ is-enabled sshd.service || true)" == disabled ]]
-dnf5 check --dependencies
-bootc container lint
+bootc container lint --fatal-warnings
+dnf5 --setopt=logdir=/run/dnf check --dependencies
 
 kernel_version=$(rpm -q kernel-core --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}\n')
 architecture=$(rpm --eval '%{_arch}')
@@ -55,7 +55,6 @@ for service in avethyos-user-config.service avethyos-discord-rpc.service \
 done
 
 test -s /usr/share/doc/avethyos/README.md
-test -s /usr/share/doc/avethyos/personal/README.md
 test -s /usr/share/doc/avethyos/LICENSE
 test -x /usr/libexec/avethyos-discord-rpc
 test -s /usr/lib/user-tmpfiles.d/avethyos-discord-rpc.conf
@@ -68,15 +67,26 @@ test -d /usr/share/avethyos/flatpak-seed
 test ! -s /etc/dnf/libdnf5.conf.d/99-avethyos-build-cache.conf
 
 if [[ "$variant" == nvidia ]]; then
-    rpm -q akmod-nvidia-open xorg-x11-drv-nvidia-cuda libva-nvidia-driver
+    rpm -q akmod-nvidia xorg-x11-drv-nvidia-cuda libva-nvidia-driver
+    [[ "$(modinfo -k "$kernel_version" -F license nvidia)" == 'Dual MIT/GPL' ]]
+    driver_version=$(rpm -q xorg-x11-drv-nvidia --queryformat '%{VERSION}')
     for module in nvidia nvidia_modeset nvidia_uvm nvidia_drm; do
         vermagic=$(modinfo -k "$kernel_version" -F vermagic "$module")
-        [[ "${vermagic%% *}" == "$kernel_version" ]]
-        grep -Eq "/${module}\.ko(\.(xz|zst|gz))?$" "$initramfs_listing"
+        if [[ "${vermagic%% *}" != "$kernel_version" ||
+              "$(modinfo -k "$kernel_version" -F version "$module")" != "$driver_version" ]]; then
+            printf 'NVIDIA module %s does not match driver %s and kernel %s.\n' \
+                "$module" "$driver_version" "$kernel_version" >&2
+            exit 1
+        fi
+        module_file=$(basename "$(modinfo -k "$kernel_version" -F filename "$module")")
+        if ! grep -Fq "/${module_file}" "$initramfs_listing"; then
+            printf 'The initramfs is missing NVIDIA module %s.\n' "$module_file" >&2
+            exit 1
+        fi
     done
     # Upgrades must use the prebuilt drivers instead of rebuilding in /usr.
     [[ "$(systemctl --root=/ is-enabled akmods.service || true)" == masked ]]
-elif rpm -q akmod-nvidia-open >/dev/null 2>&1; then
+elif rpm -q akmod-nvidia >/dev/null 2>&1 || rpm -q akmod-nvidia-open >/dev/null 2>&1; then
     echo 'The standard image unexpectedly contains the NVIDIA driver.' >&2
     exit 1
 fi

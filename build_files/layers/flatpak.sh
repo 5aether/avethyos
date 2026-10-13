@@ -26,7 +26,7 @@ flatpak remote-add --installation=avethyos-build --if-not-exists --from \
 flatpak config --installation=avethyos-build --set languages '*'
 for attempt in {1..5}; do
     if flatpak install --installation=avethyos-build -y --noninteractive --or-update flathub \
-        io.github.kolunmi.Bazaar com.github.tchx84.Flatseal; then
+        io.github.kolunmi.Bazaar com.github.tchx84.Flatseal io.github.dvlv.boxbuddyrs; then
         break
     else
         status=$?
@@ -40,7 +40,7 @@ done
 mkdir -p /usr/share/avethyos/flatpak-seed
 flatpak create-usb --installation=avethyos-build \
     /usr/share/avethyos/flatpak-seed \
-    io.github.kolunmi.Bazaar com.github.tchx84.Flatseal
+    io.github.kolunmi.Bazaar com.github.tchx84.Flatseal io.github.dvlv.boxbuddyrs
 rm /etc/flatpak/installations.d/avethyos-build.conf
 rm -rf /var/tmp/avethyos-flatpak-build
 

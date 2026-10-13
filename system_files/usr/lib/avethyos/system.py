@@ -57,9 +57,10 @@ def image_reference(value):
 
 def doctor():
     failed = []
-    for tool in ('bootc', 'Hyprland', 'qs', 'flatpak', 'distrobox', 'podman',
+    for tool in ('python3', 'bootc', 'Hyprland', 'qs', 'flatpak', 'distrobox', 'podman',
                  'newuidmap', 'newgidmap', 'pasta', 'fuse-overlayfs',
-                 'gamescope', 'gamemoderun', 'mangohud', 'fastfetch', 'nano', 'just'):
+                 'gamescope', 'gamemoded', 'gamemoderun', 'mangohud', 'fastfetch',
+                 'kitty', 'which', 'lspci', 'nano', 'just'):
         found = shutil.which(tool)
         print(f'{tool}: {found or "missing"}')
         if not found:

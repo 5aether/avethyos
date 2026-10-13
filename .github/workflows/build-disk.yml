@@ -2,116 +2,124 @@
 name: Build installer ISOs
 
 on:
+  workflow_run:
+    workflows: [Build and verify AvethyOS]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
+      build-run-id:
+        description: "Successful image build run ID (leave empty for the latest release)"
+        required: false
+        type: string
       upload-to-s3:
-        description: "Upload to S3"
+        description: "Also upload to the configured S3 bucket"
         required: false
         default: false
         type: boolean
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'disk_config/iso.toml'
-      - '.github/workflows/build-disk.yml'
-      - 'Justfile'
-      - 'image-template.env'
 
-env:
-  IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"  # do not edit
-  BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder:latest"
+permissions:
+  contents: read
+  actions: read
+  packages: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
-  cancel-in-progress: true
+  group: installer-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   build:
     name: Build ${{ matrix.variant }} installer ISO
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.path == '.github/workflows/build.yml' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event))
     runs-on: ubuntu-26.04
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         variant: [standard, nvidia]
     env:
       IMAGE_VARIANT: ${{ matrix.variant }}
-    permissions:
-      contents: read
-      packages: read
-      id-token: write
+      REQUESTED_RUN_ID: ${{ github.event.workflow_run.id || inputs.build-run-id }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
 
     steps:
-      - name: Prepare environment
-        run: |
-          USER_UID=$(id -u)
-          USER_GID=$(id -g)
-          # Lowercase the image uri
-          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> "$GITHUB_ENV"
-          echo "USER_UID=${USER_UID}" >> "$GITHUB_ENV"
-          echo "USER_GID=${USER_GID}" >> "$GITHUB_ENV"
+      - name: Fetch the trusted installer helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Maximize build space
+      - name: Authenticate for public or private image downloads
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          authfile="${RUNNER_TEMP}/installer-auth.json"
+          printf '%s' "$REGISTRY_TOKEN" | podman login --authfile "$authfile" \
+            --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          chmod 600 "$authfile"
+          echo "REGISTRY_AUTH_FILE=${authfile}" >> "$GITHUB_ENV"
+
+      - name: Resolve the exact successfully published image
+        run: |
+          set -euo pipefail
+          python3 -B build_files/ci/installer-release.py \
+            --run-id "$REQUESTED_RUN_ID" --variant "$IMAGE_VARIANT" \
+            --authfile "$REGISTRY_AUTH_FILE" --output "$GITHUB_ENV" \
+            > "${RUNNER_TEMP}/installer-release.json"
+
+      - name: Recover space for the installer build
         uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
         with:
           remove-codeql: true
 
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          submodules: recursive
-
-      - name: Install just
-        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
-
-      - name: Image configuration
-        run: |
-          IMAGE_NAME=$(just image_name)
-          if [[ "$IMAGE_VARIANT" == nvidia ]]; then
-            DEFAULT_TAG=$(just generate-nvidia-tag)
-          else
-            DEFAULT_TAG=$(just generate-default-tag)
-          fi
-          echo "IMAGE_NAME=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-          echo "DEFAULT_TAG=${DEFAULT_TAG}" >> "$GITHUB_ENV"
-
       - name: Allow OSBuild stage capabilities
-        shell: bash
         run: |
-          # Ubuntu's bwrap profile strips capabilities from OSBuild stages,
-          # blocking chown and bind mounts even inside privileged Podman.
-          # Unload only this profile on the ephemeral build runner.
-          # https://gitlab.com/apparmor/apparmor/-/blob/master/profiles/apparmor/profiles/extras/bwrap-userns-restrict
+          set -euo pipefail
+          # This Ubuntu profile strips capabilities from OSBuild stages.
+          # Unload it only on this disposable GitHub build runner.
           if [[ -f /etc/apparmor.d/bwrap-userns-restrict ]]; then
             sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
           fi
 
-      - name: Build installer ISO
-        id: build
-        uses: osbuild/bootc-image-builder-action@8661cd3832544ad68c12dcde8681b13ab0f56a8d # main
-        with:
-          builder-image: ${{ env.BIB_IMAGE }}
-          config-file: ./disk_config/iso.toml
-          image: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.DEFAULT_TAG }}
-          chown: ${{ env.USER_UID }}:${{ env.USER_GID }}
-          types: anaconda-iso
-          rootfs: btrfs
-          additional-args: --use-librepo=True
+      - name: Build the installer from its released digest
+        run: bash build_files/build-iso.sh "$IMAGE_REF" "$DEFAULT_TAG" output
 
-      - name: Upload installer ISO and checksum to job artifacts
-        if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'
+      - name: Name the installer and create its checksum
+        run: |
+          set -euo pipefail
+          mv output/bootiso/install.iso "output/${ISO_BASENAME}.iso"
+          cp "${RUNNER_TEMP}/installer-release.json" output/release.json
+          (cd output && sha256sum "${ISO_BASENAME}.iso" > SHA256SUMS)
+          {
+            printf 'Installer: `%s.iso`\n\n' "$ISO_BASENAME"
+            printf 'Image: `%s`\n\n' "$ISO_SOURCE_REF"
+            printf 'Future system updates: `%s:%s`\n\n' "$IMAGE_REF" "$DEFAULT_TAG"
+            printf 'Download the ISO and SHA256SUMS from this run’s artifacts.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the installer, checksum and release details
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ env.IMAGE_NAME }}-${{ matrix.variant }}-anaconda-iso
-          path: ${{ steps.build.outputs.output-directory }}
+          name: ${{ env.ISO_BASENAME }}-installer
+          path: |
+            output/*.iso
+            output/SHA256SUMS
+            output/release.json
           if-no-files-found: error
-          retention-days: 0
+          retention-days: 7
           compression-level: 0
-          overwrite: true
 
-      - name: Upload to S3
-        if: inputs.upload-to-s3 == true && github.event_name != 'pull_request'
-        shell: bash
+      - name: Also upload to S3
+        if: inputs.upload-to-s3 == true
         env:
           RCLONE_CONFIG_S3_TYPE: s3
           RCLONE_CONFIG_S3_PROVIDER: ${{ secrets.S3_PROVIDER }}
@@ -119,10 +127,14 @@ jobs:
           RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           RCLONE_CONFIG_S3_REGION: ${{ secrets.S3_REGION }}
           RCLONE_CONFIG_S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
-          SOURCE_DIR: ${{ steps.build.outputs.output-directory }}
-          ARTIFACT_VARIANT: ${{ matrix.variant }}
-          ARTIFACT_TYPE: anaconda-iso
+          S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y rclone
-          rclone copy "$SOURCE_DIR" "S3:${{ secrets.S3_BUCKET_NAME }}/${IMAGE_NAME}/${ARTIFACT_VARIANT}/${ARTIFACT_TYPE}"
+          rclone copy output "S3:${S3_BUCKET}/${IMAGE_NAME}/${IMAGE_VARIANT}/anaconda-iso" \
+            --include '*.iso' --include SHA256SUMS --include release.json
+
+      - name: Remove temporary registry credentials
+        if: always()
+        run: rm -f -- "${RUNNER_TEMP}/installer-auth.json"

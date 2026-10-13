@@ -5,3 +5,7 @@ CollectionID=org.flathub.Stable
 [Flatpak Preinstall com.github.tchx84.Flatseal]
 Branch=stable
 CollectionID=org.flathub.Stable
+
+[Flatpak Preinstall io.github.dvlv.boxbuddyrs]
+Branch=stable
+CollectionID=org.flathub.Stable

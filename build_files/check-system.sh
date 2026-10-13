@@ -18,17 +18,28 @@ fi
 
 rpm -q bootc ostree kernel-core kernel-modules hyprland hypridle hyprlock quickshell sddm \
     gnome-disk-utility NetworkManager bluez pipewire wireplumber flatpak \
-    nano just openssh-server fastfetch steam gamescope \
+    python3 nano just openssh-server fastfetch steam gamescope \
     gamemode.x86_64 gamemode.i686 mangohud.x86_64 mangohud.i686 \
     distrobox podman crun conmon catatonit passt fuse-overlayfs \
-    shadow-utils shadow-utils-subid
-command -v Hyprland qs sddm fastfetch gamescope gamemoderun mangoapp mangohud \
+    shadow-utils shadow-utils-subid which pciutils
+command -v python3 avethyos nano just sudo hostnamectl timedatectl localectl hyprctl \
+    Hyprland qs sddm fastfetch gamescope gamemoded gamemoderun mangoapp mangohud \
     distrobox-create distrobox-enter distrobox-export podman pasta \
-    fuse-overlayfs newuidmap newgidmap getsubids
+    fuse-overlayfs newuidmap newgidmap getsubids kitty which lspci
+[[ "$(rpm -qf --queryformat '%{NAME}' /usr/bin/python3)" == python3 ]]
+# Import every command group using the installed Python and installed modules.
+# Help parses all options without touching the running system or user files.
+/usr/bin/avethyos --help >/dev/null
+for command in kernel fnmode config wallpaper shell apps tools box gaming status update \
+    rollback image system service doctor readme recipes; do
+    /usr/bin/avethyos "$command" --help >/dev/null
+done
 [[ "$(rpm -qf --queryformat '%{NAME}' /usr/bin/fastfetch)" == fastfetch ]]
 test -s /usr/share/dbus-1/services/com.feralinteractive.GameMode.service
 getent group gamemode
 [[ "$(systemctl --root=/ is-enabled sshd.service || true)" == disabled ]]
+test -s /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/90-stage-only.conf
+systemd-analyze verify bootc-fetch-apply-updates.service
 bootc container lint --fatal-warnings
 dnf5 --setopt=logdir=/run/dnf check --dependencies
 
@@ -63,6 +74,8 @@ test -x /usr/libexec/avethyos-homebrew-bootstrap
 test -s /usr/share/flatpak/remotes.d/flathub.flatpakrepo
 test -d /usr/share/avethyos/flatpak-seed
 [[ -n "$(find /usr/share/avethyos/flatpak-seed -type f -print -quit)" ]]
+grep -Fq '[Flatpak Preinstall io.github.dvlv.boxbuddyrs]' \
+    /usr/share/flatpak/preinstall.d/avethyos.preinstall
 # The temporary build policy must not replace the installed package policy.
 test ! -s /etc/dnf/libdnf5.conf.d/99-avethyos-build-cache.conf
 

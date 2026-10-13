@@ -2,11 +2,13 @@
 import argparse
 from pathlib import Path
 import re
+import subprocess
 
 from common import run, user_only
 
 
 BREW = '/usr/libexec/avethyos-homebrew/bin/brew'
+BOX_GUI = 'io.github.dvlv.boxbuddyrs'
 
 
 def box_name(value):
@@ -21,6 +23,16 @@ def fedora_image():
     if not match:
         raise ValueError('Cannot determine the Fedora release. Specify --image when creating a box.')
     return 'registry.fedoraproject.org/fedora-toolbox:' + match[1]
+
+
+def user_flathub():
+    # The image supplies system Flathub; new users may have no user remote yet.
+    # Keep existing user remotes and their filters rather than resetting them.
+    remotes = subprocess.run(['flatpak', 'remotes', '--user', '--columns=name'],
+                             check=True, capture_output=True, text=True)
+    if 'flathub' not in remotes.stdout.splitlines():
+        run(['flatpak', 'remote-add', '--user', '--if-not-exists', '--from', 'flathub',
+             '/usr/share/flatpak/remotes.d/flathub.flatpakrepo'])
 
 
 def register(commands):
@@ -38,6 +50,7 @@ def register(commands):
     tools.add_argument('packages', nargs='*')
     box = commands.add_parser('box', help='Create Linux containers and add their apps to the launcher')
     actions = box.add_subparsers(dest='operation', required=True)
+    actions.add_parser('gui', help='Open BoxBuddy, the graphical container manager')
     actions.add_parser('list', help='List your containers')
     create = actions.add_parser('create', help='Create a Fedora container, or select another Linux image')
     create.add_argument('name', type=box_name)
@@ -67,15 +80,21 @@ def handle(options):
                  '--show-permissions', options.app])
         else:
             action = 'uninstall' if operation == 'remove' else 'install'
+            if operation == 'install' and not options.system:
+                user_flathub()
             run(['flatpak', action, '--system' if options.system else '--user',
                  *(['flathub'] if action == 'install' else []), options.app], admin=options.system)
     elif options.command == 'tools':
         if operation in ('search', 'install', 'remove') and not options.packages:
             raise ValueError('Add at least one tool name.')
         operation = 'uninstall' if operation == 'remove' else operation
-        run([BREW, operation, *options.packages])
         if operation == 'update':
+            run([BREW, 'update'])
             run([BREW, 'upgrade', *options.packages])
+        else:
+            run([BREW, operation, *options.packages])
+    elif operation == 'gui':
+        run(['flatpak', 'run', BOX_GUI])
     elif operation == 'create':
         run(['distrobox', 'create', '--name', options.name, '--image', options.image or fedora_image(),
              *(['--nvidia'] if options.nvidia else [])])

@@ -19,12 +19,13 @@ and press Enter. `sudo` asks for your login password when a system change needs 
 The standard image contains no NVIDIA driver. The NVIDIA image uses the open
 NVIDIA kernel driver, so your card must support that driver.
 
-For a fresh installation, use an installer ISO produced by the repository's
-**Actions → Build installer ISOs** workflow. Download the artifact for your version
-from a successful run, extract it, and write `bootiso/install.iso` to a USB drive
-with an image-writing application. Start your PC from that drive and follow the
-installer. If no installer artifact is available, a repository maintainer must
-run the installer workflow first.
+Installer ISOs are created automatically after a successful image release.
+Open **Actions → Build installer ISOs**, choose a successful run, and download
+the artifact for your version. Extract it and write the named `.iso` file to a
+USB drive with an image-writing application. Start your PC from that drive and
+choose your disk, language, and account in the installer. The artifact also
+includes a SHA-256 checksum. Maintainers can run the ISO workflow manually to
+recreate an installer from a previous successful release.
 
 ## What is included
 
@@ -42,7 +43,8 @@ run the installer workflow first.
   games, media codecs, firmware, and the Open Gaming Collective kernel.
 - Flatpak with Flathub, Bazaar as an app store, and Flatseal for app permissions.
 - Distrobox and its host dependencies for running software from other Linux
-  distributions, plus Homebrew for command-line tools and Topgrade.
+  distributions, BoxBuddy for managing containers with a graphical interface,
+  plus Homebrew for command-line tools and Topgrade.
 - Fedora's real Fastfetch RPM package, using its normal upstream output.
 - Discord RPC integration between native and Flatpak apps and clients that
   provide a Discord-compatible RPC service.
@@ -109,6 +111,9 @@ home folder, sound, and graphics. Its host tools are already installed. Creating
 a container downloads its image; its first start may install that distribution's
 internal integration packages automatically. Nothing extra needs installing on
 the host.
+
+Open **BoxBuddy** from the launcher to create and manage containers with buttons.
+`avethyos box gui` opens the same interface from the terminal.
 
 Create and open a Fedora box:
 
@@ -244,6 +249,13 @@ its matching Fedora language package in the image.
 
 ## Updates and recovery
 
+Automatic updates download and stage the next OS in the background. They stay
+quiet and never restart the computer. You choose when to restart. This policy
+applies to standard, NVIDIA, and personal images. To turn background downloads
+off, run `avethyos service auto-updates off`; use `on` to enable them again.
+On an older image, turn automatic updates off before staging your first update
+to this version. Re-enable them after your own manual restart into the new OS.
+
 When you choose to update, run:
 
 ```bash
@@ -321,11 +333,14 @@ builds one image; it does not build an unused second version.
 Add Fedora package names to `packages.txt`, one per line. Change image-wide kernel
 arguments in `kernel-arguments.toml`. Put additional system files under `files/`,
 following their destination paths. Every configuration file includes examples.
+Flatpak app IDs go in `flatpak-packages.txt`; use `remove-flatpak-packages.txt`
+to remove apps managed by your image. These lists also apply after OS upgrades.
 
 Follow the [personal-image guide](https://github.com/5aether/avethyos-personal#readme)
 to fork or clone the template, enable Actions, and use your image. Your default
-branch publishes your image. The official template checks its files but never
-publishes a personal image in either official repository.
+branch publishes your image and then creates its installer ISO. The separate
+personal repository builds its own image; the main OS repository never builds
+personal images.
 
 For a private registry, save a GitHub token with `read:packages` on the PC:
 

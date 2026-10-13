@@ -7,6 +7,10 @@ case "$variant" in
     *) printf 'Unknown image variant: %s\n' "$variant" >&2; exit 1 ;;
 esac
 
+# Inspect the pristine filesystem before runtime checks create their caches.
+# systemd-analyze verify runs generators and writes into /run and root's cache.
+bootc container lint --fatal-warnings
+
 # These checks inspect the image's kernel, never the runner's running kernel.
 # shellcheck source=/dev/null
 source /usr/lib/os-release
@@ -40,7 +44,6 @@ getent group gamemode
 [[ "$(systemctl --root=/ is-enabled sshd.service || true)" == disabled ]]
 test -s /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/90-stage-only.conf
 systemd-analyze verify bootc-fetch-apply-updates.service
-bootc container lint --fatal-warnings
 dnf5 --setopt=logdir=/run/dnf check --dependencies
 
 kernel_version=$(rpm -q kernel-core --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}\n')
